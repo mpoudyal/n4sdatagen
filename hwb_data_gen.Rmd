@@ -1,0 +1,3776 @@
+---
+title: "N4S human wellbeing data generation"
+output:
+  html_document: default
+  word_document:
+  pdf_document: default
+---
+**Background**
+
+This script generates for all available N4S datasets, human wellbeing (HWB) variables at the household level for
+material, subjective and relational dimensions.
+
+I first set up a dataframe with all of the potential variables, then add the 
+variables for each dataset. Each dataset has different formats so I load and
+generate variables seperately for each project.
+
+For each variables I note the description of the new variable generated, and print
+the underyling codes of the original variables before any recoding. Refer to the
+relevant survey form and documentation for the original question and codes.
+
+**1. R Setup**
+```{r setup,  message = FALSE, warning = FALSE}
+
+#### a) check packages and install if needed ###################################
+check.packages <- function(pkg){
+      new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+      if (length(new.pkg))
+          install.packages(new.pkg, dependencies = TRUE,repos = "http://cran.us.r-project.org")
+  }
+check.packages(c("ggplot2","knitr","xlsx","Hmisc","BBmisc","dplyr","grid",
+                 "reshape2","tidyr","car","openxlsx"))
+
+#### b) R markdown and knitr stuff ###################################
+knitr::opts_chunk$set(echo = TRUE) ; knitr::opts_chunk$set(root.dir = getwd())
+
+# require
+require(readr)
+require(dplyr)
+require(tidyr)
+```
+
+**2. Load functions**
+```{r functions, message = FALSE, warning = FALSE}
+
+#### a) get general functions ###################################
+source('functions.R')
+
+# function to view variables as levels
+lvls <- function(dt){apply(dt[-1],2,function(x)levels(factor(x)))}
+
+```
+
+**3. Set up main dataframe**
+```{r dataframe, message = FALSE, warning = FALSE}
+
+#### a) set up dataframe to which to append variables from each dataset #######
+
+hwb_all <- data.frame(stringsAsFactors = F,
+  
+  ## ID VARIABLES AND DEMOGRAPHICS
+  pjnm = as.character(), # project name
+  cn = character(), # country
+  yr = numeric(), # year covered by survey (latest year, where period is over several years)
+  admn1 = character(), # admin division 1 (e.g. one below national)
+  admn2 = character(), # admin division 2
+  admn3 = character(), # admin division 3
+  admn4 = character(), # admin division 4 (e.g. village; ward)
+  admn1n = character(), # admin division number codes
+  admn2n = character(), 
+  admn3n = character(), 
+  admn4n = character(), 
+  ses = character(), # social-ecological zone
+  pj_hhid = character(), # id for household used in project
+  gnd = character(), # respondent gender
+  rsp_age = as.numeric(), # respondent age
+  
+  ## MATERIAL WELLBEING INDICATORS
+  # See here for full details of the variables for each dataset:
+  # https://docs.google.com/spreadsheets/d/1TqLXVJ0kDP8ugOtzmwDj1LciyPkcLjujTZioRkhqvCs/edit?usp=sharing
+  # i) EDUCATION
+  edu_yrs = as.numeric(), # years of schooling
+  edu_chld_att = as.numeric(), # child school attendance
+  # ii) HEALTH
+  hlt_chld_mt = as.numeric(), # child mortality
+  hlt_fd_sec = as.numeric(), # food security
+  hlt_pt = as.numeric(), # protein consumption
+  # iii) LIVING STANDARDS
+  ls_elec = as.numeric(), # electricity
+  ls_san = as.numeric(), # sanitation
+  ls_wat = as.numeric(), # drinking water
+  ls_hse = as.numeric(), # housing
+  ls_fuel = as.numeric(), # cooking fuel
+  ls_ast = as.numeric(), # valuable assets
+  # iii) LIVELIHOODS
+  lv_pas = as.numeric(), # productive assets
+  # v) RISK
+  rk_exp = as.numeric(), # exposure to risk
+  
+  ## SUBJECTIVE WELLBEING INDICATOR
+  # see here for details: https://docs.google.com/document/d/1fN_6p05nBirVFrkw0GwDSRH1d6CVBb_Bl3a7BpIWkDA/edit#bookmark=id.9riqvl5i7glt
+  swb = character(),
+  
+  ## RELATIONAL WELLBEING INDICATOR
+  # see here for details: https://docs.google.com/document/d/1fN_6p05nBirVFrkw0GwDSRH1d6CVBb_Bl3a7BpIWkDA/edit#bookmark=id.xorp28w1m05x
+  
+  rwb_cm_st = as.numeric(), # community opportunity structures
+  rwb_cm_ag = as.numeric(), # community agency
+  rwb_fm_st = as.numeric(), # family opportunity structures
+  rwb_fm_ag = as.numeric() # familty agency
+  
+)
+
+# keep df col order
+dford <- names(hwb_all)
+
+
+```
+
+**4. SPACES**
+```{r spaces, message = FALSE, warning = FALSE}
+
+#### a) get data from SQL database and add to spaces list  #####################
+spaces <- list() # empty list
+# load data and add raw data tables to spaces list
+sp_db <- RSQLite::dbConnect(RSQLite::SQLite(), dbname="../data/raw/spaces_initial/hhsurvey_database.sqlite")
+tbl <- RSQLite::dbListTables(sp_db) # list tables
+tbl <- tbl[!grepl("sqlite_",tbl)] # remove unneeded sql files
+for (i in seq(along=tbl)) { # loop to extract tables and add to list
+  spaces[[i]] <- RSQLite::dbGetQuery(conn=sp_db, 
+                                     statement=paste("SELECT * FROM '", tbl[[i]], "'", sep=""))
+  spaces[[i]][spaces[[i]]==-9] <- NA # convert NAs
+  names(spaces)[i] <- tbl[i]
+}
+# get survye ids linked to hh heads
+RSQLite::dbDisconnect(sp_db) # disconnect db
+
+# check commonality of gear
+# tmp <-full_join(spaces$cover,spaces$t07_12fish_gear,by="survid") %>%
+#   select(site,gear,habitat) %>%
+#   drop_na() %>%
+#   unite("gear_habitat", gear:habitat,remove = F) %>%
+#   distinct() %>%
+#   group_by(habitat) %>%
+#   tally()
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  pj_hhid = as.character(spaces$cover$hhid),
+  survid = spaces$cover$survid, # add survid for joining, remove later
+  yr = 2014,
+  pjnm = rep("sp",nrow(spaces$cover)),
+  cn = spaces$cover$country,
+  admn1 = NA, # to add from spatial data
+  admn2 = NA, # to add from spatial data
+  admn3 = NA, # to add from spatial data
+  admn4 = spaces$cover$site, # village
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = NA,
+  ses = NA, # to add
+  gnd = spaces$cover$gender,
+  rsp_age = spaces$cover$age
+)
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("female","male"))) # add names to gender
+hwb_tmp$cn[hwb_tmp$cn=="kenya"] <- "KEN" # align country names
+hwb_tmp$cn[hwb_tmp$cn=="mz"] <- "MOZ"
+hwb_tmp$admn4 <- as.character(factor(hwb_tmp$admn4,labels=c( # align village names
+  "Kongowea", "Lalane", "Maringanha", "Mieze", "Mkwiro", "Tzunza", "vamizi", "Vanga" 
+)))
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- spaces$t05census %>%
+  dplyr::select(survid,age,edu) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  group_by(survid) %>%
+  summarise(edu_yrs = ifelse(length(age[edu>=6]>=10)>0,1,0)) %>%  # ifelse recode
+  full_join(hwb_tmp,.)
+  # codes
+  lvls(vrs)
+
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- spaces$t05census %>%
+  dplyr::select(survid,age,edu) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  group_by(survid) %>%
+  summarise(edu_chld_att = ifelse(length(age[edu<4]<=18)>0,0,1)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+
+## HEALTH
+
+# hlt_chld_mt
+# Chronic illness in household in last year
+hwb_tmp <- spaces$t03need_ke %>% # kenya
+  dplyr::select(survid,hlt_chld_mt_ke = q351) %>%
+  drop_na() %>%
+  #mutate(hlt_chld_mt=ifelse(hlt_chld_mt==1,0,1)) %>%
+  full_join(hwb_tmp,.)
+hwb_tmp <- spaces$t03need_mz %>% # kenya
+  dplyr::select(survid,hlt_chld_mt_mz = q351) %>%
+  drop_na() %>%
+  #mutate(hlt_chld_mt=ifelse(hlt_chld_mt==1,0,1)) %>%
+  full_join(hwb_tmp,.) %>%
+  mutate(hlt_chld_mt = dplyr::coalesce(hlt_chld_mt_ke, hlt_chld_mt_mz)) %>%
+  dplyr::select(-hlt_chld_mt_ke, -hlt_chld_mt_mz)
+  #mutate(hlt_chld_mt=replace(hlt_chld_mt,is.na(hlt_chld_mt),1))
+
+# hlt_fd_sec
+# Reported not having enough to eat in the last 12 months
+hwb_tmp <- spaces$t03need_ke %>% # kenya
+  dplyr::select(survid,hlt_fd_sec = q341) %>% # use raw variable
+  drop_na() %>%
+  full_join(hwb_tmp,.)
+hwb_tmp <- spaces$t03need_mz %>% # mozambique
+  dplyr::select(survid,hlt_fd_sec = q341) %>% # use raw variable
+  drop_na() %>%
+  right_join(hwb_tmp, by= "survid") %>%
+  mutate(hlt_fd_sec = dplyr::coalesce(hlt_fd_sec.x, hlt_fd_sec.y)) %>%
+  dplyr::select(-c(hlt_fd_sec.x, hlt_fd_sec.y)) %>%
+  { . ->> vrs } # keep vars
+ # codes
+  lvls(vrs[c(1,ncol(vrs))])
+
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+# first need to convert reported dates to days before survey
+hwb_tmp <- spaces$t10food %>% # kenya
+  dplyr::select(survid,q1033) %>% # use raw variable
+  right_join(spaces$cover[c("survid","hhid" ,"date")], by= "survid") %>% # add date of survey
+  mutate(date = ifelse(substr(date,1,2) %in% c(12,13), # fix survey date format 
+                       paste(substr(date,7,8),substr(date,4,5),"14",sep="/"),
+                       paste(substr(date,1,6),"14",sep=""))) %>%
+  mutate(date = ifelse(substr(date,4,5) %in% c(13:31),
+                       paste(substr(date,4,5),substr(date,1,2),"14",sep="/"),
+                       date)) %>%
+  group_by(hhid) %>%
+  mutate(q1033 = getmode(q1033[!is.na(q1033)])) %>%
+  ungroup() %>%
+  drop_na(q1033) %>%
+  mutate(date = as.Date(date,"%d/%m/%y")) %>% # convert date of survey
+  mutate(ptd = as.numeric(date - as.Date(q1033,"%d/%m/%Y"))) %>% # get days since protien
+  mutate(ptd = dplyr::coalesce(as.character(ptd),q1033)) %>% # merge with other data
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_pt = as.numeric(factor(q1033))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(hlt_pt = ifelse(hlt_pt %in% c(3,7,11,12,13,14,15,16),1,0)) %>%
+  dplyr::select(survid,hlt_pt) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs[c(1,ncol(vrs))])
+
+## LIVING STANDARDS
+
+# ls_elec
+# The household has no electricity
+hwb_tmp <- spaces$t11asset %>%
+  dplyr::select(survid,ls_elec = elec) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_elec = ifelse(ls_elec==1,0,1)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+
+# ls_san
+# The household’s sanitation facility is not flush toilet or latrine, or ventilated improved pit or composting toilet
+hwb_tmp <- spaces$t03need_ke %>% # kenya
+  dplyr::select(survid,q321,q322) %>%
+  drop_na(q321) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(q322 = as.numeric(factor(q322))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(ls_san = ifelse(q321==0,0,ifelse(q322 %in% c(6,8,14),1,0))) %>%
+  dplyr::select(survid,ls_san) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+hwb_tmp <- spaces$t03need_mz %>% # mozambique
+  dplyr::select(survid,q321,q322) %>%
+  drop_na(q321) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(q322 = as.numeric(factor(q322))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(ls_san = ifelse(q321==0,0,ifelse(q322 %in% c(2,4,5,7),1,0))) %>%
+  dplyr::select(survid,ls_san) %>%
+  right_join(hwb_tmp, by= "survid") %>%
+  mutate(ls_san = dplyr::coalesce(ls_san.x, ls_san.y)) %>%
+  dplyr::select(-c(ls_san.x, ls_san.y))
+ # codes
+  lvls(vrs)
+
+
+# ls_wat
+# Is not piped water, public tap, borehole or pump, protected well, protected spring or rainwater
+hwb_tmp <- spaces$t03need_ke %>% # kenya
+  dplyr::select(survid,q331) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(q331 = as.numeric(factor(q331))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(ls_wat = ifelse(q331 %in% c(2,3,7,12),1,0)) %>%
+  dplyr::select(survid,ls_wat) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+
+hwb_tmp <- spaces$t03need_mz %>% # mozambique
+  dplyr::select(survid,q331) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(q331 = as.numeric(factor(q331))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(ls_wat = ifelse(q331 %in% c(7,8,9,2,10,11,4,13,14),1,0)) %>%
+  dplyr::select(survid,ls_wat) %>%
+  right_join(hwb_tmp, by= "survid") %>%
+  mutate(ls_wat = dplyr::coalesce(ls_wat.x, ls_wat.y)) %>%
+  dplyr::select(-c(ls_wat.x, ls_wat.y))
+ # codes
+  lvls(vrs)
+
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- spaces$t11asset %>%
+  dplyr::select(survid,wall,roof,floor) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(wall = as.numeric(factor(wall))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(wall = ifelse(wall %in% c(6,5,9,15,18,19,20,21),1,0)) %>%
+  mutate(roof = as.numeric(factor(roof))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(roof = ifelse(roof %in% c(2,5,6,9,10,11,13),1,0)) %>%
+  mutate(floor = as.numeric(factor(floor))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(floor = ifelse(floor %in% c(1,2),0,1)) %>%
+  mutate(ls_hse = ifelse(rowSums(dplyr::select(.,wall,roof,floor),na.rm=T)<2,0,1)) %>% # generate index
+  full_join(hwb_tmp,.) %>%
+  dplyr::select(-c(wall,roof,floor))
+ # codes
+  lvls(vrs)
+
+
+# ls_fuel
+# The household cooks with dung or wood
+hwb_tmp <- spaces$t11asset %>%
+  dplyr::select(survid,ls_fuel=cook) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_fuel = as.numeric(factor(ls_fuel))) %>% # make factor, then numeric, then recode all to deal with 'others'
+  mutate(ls_fuel = ifelse(ls_fuel %in% c(3:6),1,0)) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- spaces$t11asset %>%
+  # no vars fir telephone or computer
+  dplyr::select(survid,rad=q1158,tv=q1153,bk=q1159,mbk=q11510,dhw=q11515,fdg=q1151)  %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_ast = ifelse(rowSums(dplyr::select(.,-survid),na.rm=T)==0,0,1)) %>% # generate index
+  dplyr::select(survid,ls_ast) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+## bespoke ls_ast and lv_pas variables for anamika
+ad_extra_tmp <- hwb_tmp %>%
+  select(survid:admn4n)
+
+ad_extra_tmp <- spaces$t11asset %>%
+  # no vars fir telephone or computer
+  dplyr::select(survid,rad=q1158,tv=q1153,#bk=q1159,mbk=q11510,
+                dhw=q11515,fdg=q1151)  %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_ast = ifelse(rowSums(dplyr::select(.,-survid),na.rm=T)==0,0,1)) %>% # generate index
+  dplyr::select(survid,ls_ast) %>%
+  full_join(ad_extra_tmp,.)
+ # codes
+  lvls(vrs)
+
+ad_extra_dat <- spaces$t11asset %>%
+  dplyr::select(survid,q11519:q11524) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(q11519=as.numeric(factor(q11519))-1) %>% # make all zero based numeric code
+  mutate(lv_pas = ifelse(rowSums(dplyr::select(.,-survid),na.rm=T)>0,1,0)) %>%
+  dplyr::select(survid,lv_pas) %>%
+  full_join(ad_extra_tmp,.)
+ # codes
+  lvls(vrs)
+summary(ad_extra_dat)
+  
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: agricultural land; fishing vessel; livestock
+hwb_tmp <- spaces$t11asset %>%
+  dplyr::select(survid,q11519:q11524) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(q11519=as.numeric(factor(q11519))-1) %>% # make all zero based numeric code
+  mutate(lv_pas = ifelse(rowSums(dplyr::select(.,-survid),na.rm=T)>0,1,0)) %>%
+  dplyr::select(survid,lv_pas) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+  
+## RISK
+# rk_exp
+# Experienced a shock in the last year
+hwb_tmp <- spaces$t02vuln %>%
+  dplyr::select(survid,lowhigh,year) %>%
+  right_join(spaces$cover[c("survid","hhid")]) %>%
+  group_by(hhid) %>%
+  mutate(lowhigh = getmode(lowhigh[!is.na(lowhigh)])) %>%
+  ungroup() %>%
+  #drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  filter(survid %in% hwb_tmp$survid) %>% # filter to remove duplicates
+  group_by(survid) %>%
+  summarise(rk_exp = ifelse(c("high") %in% lowhigh,1,0)) %>% # ifelse recode
+  dplyr::select(survid,rk_exp) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+
+## SUBJECTIVE WELLBEING
+
+hwb_tmp <- spaces$t01wb %>%
+  dplyr::select(survid,swb=satisf) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(swb = as.character(factor(swb,labels=c("Very satisfied", # add labels and make character
+                                   "Satisfied",
+                                   "Dissatisfied",
+                                   "Very dissatisfied")))) %>%
+  full_join(hwb_tmp,.)
+ # codes
+  lvls(vrs)
+
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- spaces$t03need_ke %>% # kenya
+  dplyr::select(survid,rwb_cm_st=q382) %>% # use raw variable
+  mutate(rwb_cm_st=replace(rwb_cm_st,which(is.na(rwb_cm_st)),0)) %>% # assume NAs are 0
+  drop_na() %>%
+  full_join(hwb_tmp,.)
+hwb_tmp <- spaces$t03need_mz %>% # mozambique
+  dplyr::select(survid,rwb_cm_st=q382) %>% # use raw variable
+  #drop_na() %>%
+  right_join(hwb_tmp, by= "survid") %>%
+  mutate(rwb_cm_st = dplyr::coalesce(rwb_cm_st.x, rwb_cm_st.y)) %>%
+  { . ->> vrs } %>% # keep vars
+  dplyr::select(-c(rwb_cm_st.x, rwb_cm_st.y))
+ # codes
+  lvls(vrs[c(1,ncol(vrs))])
+
+# Community agency
+# rwb_cm_ag
+# Alternative 1: No one outside of family to turn to if household needs help
+hwb_tmp <- spaces$t03need_ke %>% # kenya
+  dplyr::select(survid,rwb_cm_ag=q392) %>% # use raw variable
+  drop_na() %>%
+  full_join(hwb_tmp,.)
+hwb_tmp <- spaces$t03need_mz %>% # mozambique
+  dplyr::select(survid,rwb_cm_ag=q392) %>% # use raw variable
+  drop_na() %>%
+  right_join(hwb_tmp, by= "survid") %>%
+  mutate(rwb_cm_ag = dplyr::coalesce(rwb_cm_ag.x, rwb_cm_ag.y)) %>%
+  dplyr::select(-c(rwb_cm_ag.x, rwb_cm_ag.y))  %>% 
+  { . ->> vrs } # keep vars
+ # codes
+  lvls(vrs[c(1,ncol(vrs))])
+
+
+# Family opportunity structures
+# rwb_fm_st
+# No close relatives in the village
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+#  Alternative 1: Almost never (or) below involed in family decisions
+hwb_tmp <- spaces$t03need_ke %>% # kenya
+  dplyr::select(survid,rwb_fm_ag=q3103) %>% # use raw variable
+  drop_na() %>%
+  full_join(hwb_tmp,.)
+hwb_tmp <- spaces$t03need_mz %>% # mozambique
+  dplyr::select(survid,rwb_fm_ag=q3103) %>% # use raw variable
+  drop_na() %>%
+  right_join(hwb_tmp, by= "survid") %>%
+  mutate(rwb_fm_ag = dplyr::coalesce(rwb_fm_ag.x, rwb_fm_ag.y)) %>%
+  dplyr::select(-c(rwb_fm_ag.x, rwb_fm_ag.y)) %>%
+  mutate(rwb_fm_ag = ifelse(rwb_fm_ag==1,0,1)) %>%  # ifelse recode  
+  { . ->> vrs } # keep vars
+ # codes
+  lvls(vrs[c(1,ncol(vrs))])
+
+
+## c) Check variables and tidy  ###################################
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)]
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# SPACES did several interviews per household
+# just keeping most complete response for now, then taking first row for ties, assuming it was hh head
+hwb_tmp <- hwb_tmp %>%
+  mutate(value = rowSums(is.na(.))) %>%
+  group_by(pj_hhid)  %>%
+  filter(value == min(value)) %>% # get most complete response
+  filter(row_number()==1) %>% # then first row in group
+  dplyr::select(-c("value"))
+
+# align variable classes with main dataframe
+# for (i in 1:ncol(hwb_tmp)){
+#   class(hwb_tmp[,i]) <- class(hwb_all[,i])}
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(hwb_tmp,sp_db,i,tbl,spaces)
+
+
+```
+
+**5. DELTAS **
+```{r deltas, message = FALSE, warning = FALSE}
+
+#### a) get data from csvs for each round  #####################
+# add id for each round and bind to one dataframe
+
+## household survey round 1
+# - Falgun to Jaishthoo. Spring and Summer. mid Feb to mid June
+de_hh_r1_raw <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                     "../data/raw/sango/DELTAS/1-Spatial/07-ESPA_Deltas_1st_Round.csv")
+de_hh_r1_raw$rnd <- paste(de_hh_r1_raw$IDNO,"r1",sep="")
+
+## household survey round 2
+# - Ashar to Ashwin. Monsoon and Autumn. Mid-June to Mid October.
+de_hh_r2_raw <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                     "../data/raw/sango/DELTAS/1-Spatial/08-ESPA_Deltas_2nd_Round.csv")
+de_hh_r2_raw$rnd <- paste(de_hh_r2_raw$IDNO,"r2",sep="")
+
+## household survey round 3
+# - Kartik to Magh. Dry season Winter. Mid-October to Mid February
+de_hh_r3_raw <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                     "../data/raw/sango/DELTAS/1-Spatial/09-ESPA_Deltas_3rd_Round.csv")
+de_hh_r3_raw$rnd <- paste(de_hh_r3_raw$IDNO,"r3",sep="")
+
+## make big dataframe
+de_hh <- rbind(de_hh_r1_raw,de_hh_r2_raw,de_hh_r3_raw)
+
+## deal with NAs
+de_hh[de_hh==96] <- NA
+
+## clean workspace
+rm(de_hh_r1_raw,de_hh_r2_raw,de_hh_r3_raw)
+
+## keep segment info for merge at end
+de_seg <- unique(de_hh[c("IDNO","UNION","MOUZA","SEGMENT")])
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  IDNO = de_hh$IDNO,
+  rnd = de_hh$rnd, # get round var for now, remove later
+  pjnm = "de",
+  cn = "BGD",
+  yr = 2015,
+  admn1 = NA, # to add name from spatial data
+  admn2 = NA, # to add name from spatial data
+  admn3 = NA, # to add name from spatial data
+  admn4 = NA, # to add name from spatial data
+  admn1n = de_hh$DIVISION, # to add name from spatial data
+  admn2n = de_hh$DISTRICT, # to add name from spatial data
+  admn3n = de_hh$UNION, # to add name from spatial data
+  # admn4n = de_hh$MOUZA,
+  admn4n = paste(de_hh$CLUSTER,de_hh$ZONE,de_hh$DIVISION,de_hh$DISTRICT,
+                 de_hh$UPAZILA,de_hh$UNION,de_hh$MOUZA,sep=""),
+  ses = de_hh$ZONE, # to add name from spatial data
+  gnd = de_hh$Q104_01,
+  rsp_age = de_hh$Q105_01
+)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("female","male"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,starts_with("Q105"),starts_with("Q109")) %>%
+  gather(v, value, Q105_01:Q109_30) %>% # reshape
+  separate(v, c("var", "col")) %>%
+  arrange(rnd) %>%
+  spread(var, value) %>%
+  drop_na() %>%
+  mutate(age=Q105,edu=Q109) %>%
+  { . ->> vrs } %>% # keep vars
+  group_by(rnd) %>%
+  summarise(edu_yrs = ifelse(length(age[edu>=6]>=10)>0,1,0)) %>% # ifelse recode
+  dplyr::select(rnd,edu_yrs) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs[c(1,5,6)])
+
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,starts_with("Q105"),starts_with("Q109")) %>%
+  gather(v, value, Q105_01:Q109_30) %>% # reshape
+  separate(v, c("var", "col")) %>%
+  arrange(rnd) %>%
+  spread(var, value) %>%
+  drop_na() %>%
+  mutate(age=Q105,edu=Q109) %>%
+  { . ->> vrs } %>% # keep vars
+  group_by(rnd) %>%
+  summarise(edu_chld_att = ifelse(length(age[edu<4]<=18)>0,0,1)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs[c(1,5,6)])
+
+## HEALTH
+
+# hlt_chld_mt
+# Alternative 1:  has any child below 5 years died in the last year 
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,hlt_chld_mt=Q216) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  group_by(rnd) %>%
+  mutate(hlt_chld_mt=ifelse(hlt_chld_mt==1,0,1))%>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+
+# hlt_fd_sec
+# HH is in lowest quantile of food diversity in last seven days
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,starts_with("Q1302")) %>%
+  drop_na() %>%
+  mutate(hlt_fd_sec = -rowSums(select(.,starts_with("Q1302_")),na.rm=T)) %>%
+  mutate(hlt_fd_sec=as.numeric(cut(hlt_fd_sec,breaks=quantile(hlt_fd_sec)))) %>%
+  mutate(hlt_fd_sec=ifelse(hlt_fd_sec==1,0,1)) %>%
+  dplyr::select(rnd,hlt_fd_sec) %>%
+  full_join(hwb_tmp,.)
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,starts_with("Q1302")) %>%
+  dplyr::select(rnd,Q1302_26:Q1302_34)  %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_pt = ifelse(2 %in% Q1302_26:Q1302_34,1,0)) %>%
+  dplyr::select(rnd,hlt_pt) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+
+## LIVING STANDARDS
+
+# ls_elec
+# A1: Main source of light is not electric mains
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,ls_elec = Q213) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_elec = ifelse(ls_elec %in% c(2),1,0)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+
+# ls_san
+# The household’s sanitation facility is not flush toilet or latrine, or ventilated improved pit or composting toilet
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,ls_san = Q203) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_san = ifelse(ls_san %in% c(1:7),1,0)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+
+# ls_wat
+# Is not piped water, public tap, borehole or pump, protected well, protected spring or rainwater
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,ls_wat = Q206) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_wat = ifelse(ls_wat %in% c(1:5,7),1,0)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,Q210:Q212) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(
+    fl = ifelse(Q210 %in% c(1),0,1),
+    wl = ifelse(Q211 %in% c(5:7),0,1),
+    rf = ifelse(Q212 %in% c(4,7),0,1)
+  ) %>% mutate(ls_hse = ifelse(rowSums(dplyr::select(.,fl,wl,rf),na.rm=T)<2,0,1)) %>%
+  dplyr::select(rnd,ls_hse) %>%
+  full_join(hwb_tmp,.) 
+# codes
+lvls(vrs)
+
+
+# ls_fuel
+# The household cooks with dung or similar
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,ls_fuel = Q202) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_fuel = ifelse(ls_fuel %in% c(9:11),0,1)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,rad=Q209_24,tv=Q209_25,ph=Q209_26,tph=Q209_27,bk=Q209_34, # no computer var
+         mbk=Q209_35,cr=Q209_36,cr2=Q209_37,fdg=Q209_28) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(vars(rad:fdg), funs(-. + max(.,na.rm=T))) %>% # make zero based, with 0 as absence
+  mutate(ls_ast = ifelse(rowSums(dplyr::select(.,-rnd),na.rm=T)>1,1,0)) %>%
+  dplyr::select(rnd,ls_ast) %>%
+  full_join(hwb_tmp,.) 
+# codes
+lvls(vrs)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: agricultural land; fishing vessel; livestock
+
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,Q9D01,Q209_13,Q209_14,starts_with("Q9B01_")) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(vars(Q209_13:Q9B01_96),list(~ -. + max(.,na.rm=T))) %>% # make all vars zero based
+  mutate(lv_pas = ifelse(rowSums(dplyr::select(.,-rnd),na.rm=T)>0,1,0)) %>% # recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,starts_with("Q1001_")) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(vars(Q1001_1:Q1001_96), funs(-. + max(.,na.rm=T))) %>% # make zero based, with 0 as absence
+  mutate(rk_exp = ifelse(rowSums(dplyr::select(.,-rnd),na.rm=T)>1,0,1)) %>%
+  dplyr::select(rnd,rk_exp) %>%
+  full_join(hwb_tmp,.) 
+# codes
+lvls(vrs)
+
+
+## SUBJECTIVE WELLBEING
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,swb=Q1501A) %>%
+  { . ->> vrs }  %>% # keep vars
+  mutate(swb=as.character(swb)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Alternative 1: Has successfully been granted community land by the local NRM institution
+# rwb_cm_st
+hwb_tmp$rwb_cm_st <- as.numeric(NA)
+  
+# Community agency
+# rwb_cm_ag
+# No data
+hwb_tmp <- de_hh %>%
+  dplyr::select(rnd,rwb_cm_ag=Q1101B) %>% # khas land
+  { . ->> vrs } %>% # keep vars
+  mutate_at(vars(rwb_cm_ag), funs(ifelse(.>=2,0,1))) %>% # make zero based, with 0 as absence
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp$rwb_fm_ag <- as.numeric(NA) # no data
+
+## c) Check variables and tidy  ###################################
+
+# DELTAS did three rounds. below converting to yearly values for now
+# using median or presence/absence as appropriate
+
+hwb_tmp$rnd <- NULL # remove round var
+names(hwb_tmp)[names(hwb_tmp)=="IDNO"] <- "pj_hhid" # rename ID
+hwb_tmp <- hwb_tmp[names(hwb_all)] # align col order with main df
+
+hwb_tmp <- hwb_tmp %>%
+  group_by(pj_hhid) %>%
+  summarise(
+    pjnm = as.character(getmode(pjnm)),
+    cn = as.character(getmode(cn)),
+    yr = getmode(yr),
+    admn1 = as.character(getmode(admn1)),
+    admn2 = as.character(getmode(admn2)),
+    admn3 = as.character(getmode(admn3)),
+    admn4 = as.character(getmode(admn4)),
+    admn1n = as.character(getmode(admn1n)), # admin division number codes
+    admn2n = as.character(getmode(admn2n)), 
+    admn3n = as.character(getmode(admn3n)), 
+    admn4n = as.character(getmode(admn4n)), 
+    ses = as.character(getmode(ses)),
+    gnd = as.character(getmode(gnd)),
+    rsp_age = getmode(rsp_age),
+    edu_yrs = trunc(median(edu_yrs,na.rm=T)), 
+    edu_chld_att = trunc(median(edu_chld_att,na.rm=T)),
+    hlt_chld_mt = trunc(median(hlt_chld_mt,na.rm=T)),
+    hlt_fd_sec = trunc(median(hlt_fd_sec,na.rm=T)),
+    hlt_pt = trunc(median(hlt_pt, na.rm=T)),
+    ls_elec = trunc(median(ls_san, na.rm=T)),
+    ls_san = trunc(median(ls_san, na.rm=T)),
+    ls_wat = trunc(median(ls_wat, na.rm=T)),
+    ls_hse = trunc(median(ls_hse, na.rm=T)),
+    ls_fuel = trunc(median(ls_fuel, na.rm=T)),
+    ls_ast = trunc(median(ls_ast, na.rm=T)),
+    lv_pas =  trunc(median(ls_ast, na.rm=T)),
+    rk_exp = min(rk_exp, na.rm=T),
+    swb = as.character(getmode(swb)),
+    rwb_cm_st = trunc(median(rwb_cm_st, na.rm=T)),
+    rwb_cm_ag = trunc(median(rwb_cm_ag, na.rm=T)),
+    rwb_fm_st = trunc(median(rwb_fm_st, na.rm=T)),
+    rwb_fm_ag = trunc(median(rwb_fm_ag, na.rm=T))
+  )
+hwb_tmp$pj_hhid <- as.character(hwb_tmp$pj_hhid)
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(de_hh,hwb_tmp)
+
+```
+
+**6. PAGES **
+```{r pages, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+nm <- c(list.files("../data/raw/sango/P4GES/1-P4GES_HHS_CE/data",full.names=T),
+        list.files("../data/raw/sango/P4GES/2-P4GES_AGR_WHP/data",full.names=T))
+pa_hh <- list()
+for (i in 1:length(nm)){
+  pa_hh[[i]] <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm[i])
+  names(pa_hh)[i] <- strsplit(nm[i],"/")[[1]][8]
+  names(pa_hh)[i] <- substr(names(pa_hh)[i],1,nchar(names(pa_hh)[i])-15)
+  pa_hh[[i]][pa_hh[[i]]==-98] <- NA # convert NAs
+}
+
+tmp <- pa_hh$HHS_S09_ASSET
+
+tmp <- pa_hh$WHP_S02_PRODSHARV
+
+# check how many village report harvests from rivers
+# table(pa_hh$WHP_S02_PRODSHARV$fonkotany,
+#       pa_hh$WHP_S02_PRODSHARV$prod_prior_name,
+#       pa_hh$WHP_S02_PRODSHARV$imp_lvh)
+# unique(pa_hh$WHP_S02_PRODSHARV$prod_prior_name)
+
+# check prevalence of aquaculture
+# names(pa_hh$AGR_S04_LIVESTOCK) # no ponds reported in ag survey
+# table(pa_hh$HHS_S09_ASSET$fokontany, # only 3 out of
+#       pa_hh$HHS_S09_ASSET$num_fish_tank)
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  resp_id = pa_hh$HHS_S01_INFO$resp_id,
+  pjnm = "pa",
+  cn = as.character("MDG"),
+  yr = 2014,
+  admn1 = as.character(NA), # to add name from spatial data
+  admn2 = as.character(NA), # to add name from spatial data
+  admn3 = as.character(NA), # to add name from spatial data
+  admn4 = pa_hh$HHS_S01_INFO$fokontany,
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = NA, 
+  ses = as.character(NA), # to add name from spatial data
+  gnd = pa_hh$HHS_S02_HROST1$resp_gender,
+  rsp_age = pa_hh$HHS_S02_HROST1$resp_age
+)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("female","male"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- pa_hh$HHS_S03_HROST2 %>%
+  dplyr::select(resp_id,age,edu=edu_sch_yrs) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  group_by(resp_id) %>%
+  summarise(edu_yrs = ifelse(length(age[edu>=6]>=10)>0,1,0)) %>% # ifelse recode
+  dplyr::select(resp_id,edu_yrs) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# edu_chld_att
+# No data
+hwb_tmp$edu_chld_att <- NA
+
+## HEALTH
+
+# hlt_chld_mt
+# No data
+hwb_tmp$hlt_chld_mt <- NA
+
+# hlt_fd_sec
+# Reported not having enough to eat in the last 12 months
+hwb_tmp <- pa_hh$HHS_S09_ASSET %>%
+  dplyr::select(resp_id,hlt_fd_sec=food_sec) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_fd_sec = ifelse(hlt_fd_sec==12,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+hwb_tmp$hlt_pt <- NA
+
+## LIVING STANDARDS
+
+# ls_elec
+# A2: Always has enough light in the home
+hwb_tmp <- pa_hh$HHS_S09_ASSET %>%
+  dplyr::select(resp_id,ls_elec=light_sufficiency) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_elec = ifelse(ls_elec==5,1,0)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_san
+# No data
+hwb_tmp$ls_san <- NA
+
+# ls_wat
+# No data
+hwb_tmp$ls_wat <- NA
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- pa_hh$HHS_S09_ASSET %>%
+  dplyr::select(resp_id,main_house_wl,main_house_wl_spfy,main_house_rf,
+         main_house_rf_spfy)  %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(wl=as.numeric(as.factor(ifelse(main_house_wl==4,  # combine other cols, make factor then numeric
+                             main_house_wl_spfy,main_house_wl)))) %>%
+  mutate(rf=as.numeric(as.factor(ifelse(main_house_rf==4,
+                             main_house_rf_spfy,main_house_rf))))  %>% 
+  mutate(wl=ifelse(wl %in% c(6,7,8,10,19,20,22),1,0))  %>%  # recode
+  mutate(rf=ifelse(rf %in% c(2),1,0)) %>%
+  mutate(ls_hse=ifelse(rowSums(dplyr::select(.,wl,rf),na.rm=T)==2,1,0)) %>%
+  dplyr::select(resp_id,ls_hse) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# ls_fuel
+# No data
+hwb_tmp$ls_fuel <- as.numeric(NA)
+
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- pa_hh$HHS_S09_ASSET %>%
+  dplyr::select(resp_id,radio_num,bicycle_num,phone_num, # exc. motorbike. computer, fridge. inc. mplayer and dvd
+         tv_num,mplayer_num,dvd_num) %>% # exc. other cats as already interated into other cols
+  { . ->> vrs } %>% # keep vars
+  mutate(ls_ast=ifelse(rowSums(dplyr::select(.,-resp_id),na.rm=T)>1,1,0)) %>%
+  dplyr::select(resp_id,ls_ast) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: agricultural land; fishing vessel; livestock
+tmp <- pa_hh$HHS_S06_LAND %>% # get land info
+  dplyr::select(resp_id,plot_ownership) %>%
+  group_by(resp_id) %>%
+  summarise(plot_ownership = ifelse(sum(plot_ownership) %in% c(1,3,5,6),1,0)) # recode
+hwb_tmp <-  pa_hh$HHS_S09_ASSET %>% # get livestock
+  dplyr::select(resp_id, num_cattle:num_other_liv) %>%
+  mutate_at(vars(num_cattle:num_other_liv),list(~.-1)) %>% # make zero based
+  full_join(tmp) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(lv_pas = ifelse(rowSums(dplyr::select(.,-resp_id),na.rm=T)>0,1,0)) %>% # recode again
+  dplyr::select(resp_id,lv_pas) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+pa_pa <- pa_hh$HHS_S06_LAND %>% # get land info
+  dplyr::select(resp_id,site,plot_area,plot_seed_qty)
+pa_pa <- merge(pa_pa,pa_hh$HHS_S01_INFO[c("resp_id", "fokontany")],
+               by = "resp_id", all.x=T)
+write.csv(pa_pa,"pa_pa.csv")
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp$rk_exp <-  as.numeric(NA) # no data
+
+## SUBJECTIVE WELLBEING
+# no data
+hwb_tmp$swb <- as.numeric(NA)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- pa_hh$HHS_S10_SOCAP %>%
+  dplyr::select(resp_id,ends_with("_provider"),starts_with("mem_type")) %>%
+  na_if("") %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(rwb_cm_st = ifelse(rowSums(!is.na(dplyr::select(.,-resp_id)), # ifelse record
+                                    na.rm=T)>0,1,0)) %>%
+  dplyr::select(resp_id,rwb_cm_st) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# Community agency
+# rwb_cm_ag
+# No data
+hwb_tmp <- pa_hh$HHS_S10_SOCAP %>%
+  dplyr::select(resp_id,rwb_cm_ag =community_help) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(rwb_cm_ag = ifelse(rwb_cm_ag>0,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# Alternative 2: No assistance from extended family if serious problem
+hwb_tmp <- pa_hh$HHS_S10_SOCAP %>%
+  dplyr::select(resp_id,rwb_fm_ag =ext_fam_help) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(rwb_fm_ag = ifelse(rwb_fm_ag>0,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## c) Check variables and tidy  ###################################
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# update id name
+names(hwb_tmp)[names(hwb_tmp)=="resp_id"] <- "pj_hhid"
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(pa_hh,hwb_tmp)
+
+```
+
+**7. PIMA **
+```{r pima, message = FALSE, warning = FALSE}
+
+#### a) get data #####################
+# PIMA did a full survey with the male householdhead and a different, partial survey
+# in a subset of households with the wife. Most responses on material WB indicators 
+# are in the full survey, so I mainly use those here, supplemented by responses
+# from the wife survey where indicated.
+# Some of the responses from the wife survey could also be included in the monetary liveilhoods
+# indicators and/or moderating factors datasets.
+
+
+## i) household head survey
+pi_hh <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                         "../data/raw/sango/PIMA/2-PIMA_HHHEAD/PIMA_HHHEAD_SURVEY.CSV")
+
+# deal with null values
+pi_hh[pi_hh=="null"] <- NA
+pi_hh[pi_hh==-7] <- NA
+pi_hh[pi_hh==-8] <- NA
+pi_hh[pi_hh==-9] <- NA
+pi_hh[pi_hh==""] <- NA
+
+# the following households has data entry errors so removing
+# household 692, village 7. Q10 
+pi_hh <- subset(pi_hh, !(pi_hh$q1.1 == 7) | !(pi_hh$q1.2 == 692))
+# household 369. vullage 30. q4.2.5
+pi_hh <- subset(pi_hh, !(pi_hh$q1.1 == 30) | !(pi_hh$q1.2 == 369))
+
+# make unique household ID
+pi_hh$IDNO <- paste0(pi_hh$q1.1,"_",pi_hh$q1.2,sep="")
+
+## ii) wife survey
+
+# household wife survey
+pi_wf <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                         "../data/raw/sango/PIMA/3-PIMA_WIFE/PIMA_WIFE_SURVEY.CSV")
+# deal with null values
+pi_wf[pi_wf=="null"] <- NA
+pi_wf[pi_wf==-7] <- NA
+pi_wf[pi_wf==-17] <- NA
+pi_wf[pi_wf==-8] <- NA
+pi_wf[pi_wf==-9] <- NA
+pi_wf[pi_wf==""] <- NA
+# make null NA
+pi_wf[pi_wf=="null"] <- NA
+
+# make unique ID
+pi_wf$IDNO <- paste0(pi_wf$q1.1,"_",pi_wf$q1.2,sep="")
+
+# checking contribution of ES to env income.
+# tmp <- pi_hh %>%
+#   select(q1.1,q9.1.1:q9.1.9,q10.1.1:q10.1.6) %>%
+#   mutate_at(vars(q9.1.1:q9.1.9),as.numeric) %>% # get pc of types of env income
+#   mutate_at(vars(q9.1.1:q9.1.9),funs(./50)) %>%
+#   mutate_at(vars(q10.1.1:q10.1.6),as.numeric) %>% # get pc of types of livelihoods
+#   mutate_at(vars(q10.1.1:q10.1.6),funs(./25)) %>%
+#   mutate(fish_pc_tot_lvl=q9.1.5 * q10.1.3) %>% # get fish as % of total livelihood
+#   filter(fish_pc_tot_lvl>0) %>% # 75 out of 1922 hh report income from fisheries. 1%
+#   filter(fish_pc_tot_lvl>0.05) # 17 report an income of between 5% and 10%
+#   # 4 report an income of over 10%
+#   summarise(fish_pc_env_inc=max(q9.1.5))
+
+
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  IDNO = pi_hh$IDNO,
+  pjnm = "pi",
+  cn = "TZA",
+  yr = 2015,
+  admn1 = as.character(NA), # to add name from spatial data
+  admn2 = as.character(NA), # to add name from spatial data
+  admn3 = as.character(NA), # to add name from spatial data
+  admn4 = as.character(NA), # need village names linked to IDs from PIMA ppl
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = as.character(pi_hh$q1.1), 
+  ses = as.character(NA), 
+  gnd = pi_hh$q2.0,
+  rsp_age = as.numeric(pi_hh$q2.1)
+)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("male","female"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# Alternative 1: Household head has not completed more than six years of schooling
+hwb_tmp <- pi_hh %>%
+  dplyr::select(IDNO,edu_yrs=q2.2) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(edu_yrs = ifelse(edu_yrs<=6,0,1)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# edu_chld_att
+# No data
+hwb_tmp$edu_chld_att <- NA
+
+## HEALTH
+
+# hlt_chld_mt
+# Severe illness of breadwinner in last year
+hwb_tmp <- pi_hh %>%
+  dplyr::select(IDNO,hlt_chld_mt=q4.2.2) %>%
+  mutate(hlt_chld_mt=ifelse(hlt_chld_mt>0,1,0))%>%
+  full_join(hwb_tmp,.)
+
+# hlt_fd_sec
+# No data
+hwb_tmp <- pi_wf %>%
+  dplyr::select(IDNO,hlt_fd_sec=q7.1) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_fd_sec = ifelse(hlt_fd_sec>2,1,0))%>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+hwb_tmp <- pi_hh %>%
+  dplyr::select(IDNO,hlt_pt=q7.1.1) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_pt = ifelse(hlt_pt %in% c(1,2),1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVING STANDARDS
+
+# ls_elec
+# No data
+hwb_tmp$ls_elec <- as.numeric(NA)
+
+# ls_san
+# No data
+hwb_tmp$ls_san <- as.numeric(NA)
+
+# ls_wat
+# No data
+hwb_tmp$ls_wat <- as.numeric(NA)
+
+# ls_hse
+# No data
+hwb_tmp$ls_hse <- as.numeric(NA)
+  
+# ls_fuel
+# No data
+hwb_tmp$ls_fuel <- as.numeric(NA)
+
+# ls_ast
+# No data
+hwb_tmp$ls_ast <- as.numeric(NA)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: agricultural land; fishing vessel; livestock
+hwb_tmp <- pi_hh %>%
+  dplyr::select(IDNO,q5.1.3,q6.0) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(lv_pas = ifelse(rowSums(dplyr::select(.,-IDNO),na.rm=T)>0,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# pi_pa <- pi_hh %>%
+#   dplyr::select(IDNO,WMA.nonWMA,q1.1,q6.1.2.1,q6.1.2.2,q6.1.2.3)
+# names(pi_pa) <- c("hhid","WMA","vlid","cows","bulls","calves")
+# write.csv(pi_pa,"pi_pa.csv")
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp <- pi_hh %>%
+  dplyr::select(IDNO,rk_exp=q4.1) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(rk_exp = ifelse(rk_exp==1,0,1)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## SUBJECTIVE WELLBEING
+# no data
+hwb_tmp$swb <- as.numeric(NA)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- pi_hh %>%
+  dplyr::select(IDNO,rwb_cm_st=q5.5) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(rwb_cm_st = ifelse(rwb_cm_st %in% c(0,1),0,1)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# Community agency
+# rwb_cm_ag
+# Alternative 2: Feels unable to exert influence on decisions in NRM organisation asked about in the survey
+
+hwb_tmp <- pi_hh %>%
+  dplyr::select(IDNO,rwb_cm_ag=q11.9,q1.2) %>%
+  group_by(q1.2) %>%
+  mutate(rwb_cm_ag=replace(rwb_cm_ag, which(is.na(rwb_cm_ag)), 
+                           getmode(rwb_cm_ag[!is.na(rwb_cm_ag)]))) %>%
+  ungroup() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(rwb_cm_ag=ifelse(rwb_cm_ag==1,1,0)) %>%
+  mutate(rwb_cm_ag = replace(rwb_cm_ag, which(is.na(rwb_cm_ag)),0)) %>%
+  select(-q1.2) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp$rwb_fm_ag <- as.numeric(NA) # no data
+
+## c) Check variables and tidy  ###################################
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# update id name
+names(hwb_tmp)[names(hwb_tmp)=="IDNO"] <- "pj_hhid"
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(pi_hh,pi_wf,hwb_tmp)
+
+```
+
+**8. ACES **
+```{r aces, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+nm <- list.files("../data/raw/sango/ACES/HHSURVEY/data",full.names=T)
+ac_hh <- list()
+for (i in 1:length(nm)){
+  ac_hh[[i]] <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm[i])
+  names(ac_hh)[i] <- strsplit(nm[i],"/")[[1]][8]
+  names(ac_hh)[i] <- strsplit( names(ac_hh)[i],"_anon")[[1]][1]
+  names(ac_hh)[i] <- strsplit( names(ac_hh)[i],"_che")[[1]][1]
+  ac_hh[[i]][ac_hh[[i]]==""] <- NA # convert NAs
+  ac_hh[[i]][ac_hh[[i]]=="skipped"] <- NA
+  ac_hh[[i]][ac_hh[[i]]=="nao_sabe"] <- NA
+  ac_hh[[i]][ac_hh[[i]]=="unknown"] <- NA
+  ac_hh[[i]][ac_hh[[i]]=="Mucavango_2_not_on_frame"] <- # correct a village name
+    "Mucavango_2"
+}
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  hh_survey_id = ac_hh$a_household$hh_survey_id,
+  pjnm = "ac",
+  cn = as.character("MOZ"),
+  yr = 2015,
+  admn1 = ac_hh$a_household$province, # to add name from spatial data
+  admn2 = ac_hh$a_household$district, # to add name from spatial data
+  admn3 = ac_hh$a_household$admin_post,
+  admn4 = ac_hh$a_household$village,
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = NA, 
+  ses = as.character(NA) # to add name from spatial data
+)
+
+hwb_tmp <- ac_hh$b_household %>%
+  dplyr::select(hh_survey_id,gnd=sex,rsp_age=age_years) %>%
+  group_by(hh_survey_id) %>%
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("female","male"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- ac_hh$b_household %>%
+  dplyr::select(hh_survey_id,edu=highest_education_level,age=age_years) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(edu = as.numeric(as.factor(edu))) %>%  # convert edu to numeric codes
+  group_by(hh_survey_id) %>% 
+  summarise(edu_yrs = ifelse(length(age[edu %in% c(6,14:23)]>=10)>0,1,0)) %>% # ifelse recode
+  dplyr::select(hh_survey_id,edu_yrs) %>%
+  full_join(hwb_tmp,.) %>%
+  mutate(edu_yrs = replace(edu_yrs, is.na(edu_yrs),0)) # assuming NA is zero
+# codes
+lvls(vrs)
+
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- ac_hh$b_household %>%
+  dplyr::select(hh_survey_id,edu=recent_school_attendance,age=age_years) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(edu = as.numeric(as.factor(edu))) %>%  # convert edu to numeric codes
+  group_by(hh_survey_id) %>%
+  summarise(edu_chld_att = ifelse(length(age[edu %in% c(2)]<=12)>0,1,0))  %>% # ifelse recode
+  dplyr::select(hh_survey_id,edu_chld_att) %>%
+  full_join(hwb_tmp,.) %>%
+  mutate(edu_chld_att = replace(edu_chld_att, is.na(edu_chld_att),0)) # assuming NA is zero
+# codes
+lvls(vrs)
+
+## HEALTH
+
+# hlt_chld_mt
+#  Alternative 1: has any child below 5 years died in the last year
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,hlt_chld_mt = infant_death) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(hlt_chld_mt = as.numeric(factor(hlt_chld_mt))) %>% # get var as numeric
+  mutate(hlt_chld_mt = hlt_chld_mt - 1) %>% # make zero based
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_fd_sec
+# Reported not having enough to eat in the last 12 months
+hwb_tmp <- ac_hh$h_food_shortage %>%
+  dplyr::select(hh_survey_id=hh_id, hlt_fd_sec = type) %>%
+  # group_by(hlt_fd_sec) %>%
+  # tally()
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(hlt_fd_sec = as.numeric(as.factor(hlt_fd_sec))) %>% # get as numeric
+  group_by(hh_survey_id) %>%
+  summarise(hlt_fd_sec = ifelse(length( # recode
+  hlt_fd_sec[hlt_fd_sec%in%c(68)])>0,1,0)) %>%
+  full_join(hwb_tmp,.) %>%
+  mutate(hlt_fd_sec = replace(hlt_fd_sec, is.na(hlt_fd_sec),1)) # assuming NA is zero
+# codes
+lvls(vrs)
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+
+hwb_tmp <- ac_hh$h_source_protein %>%
+  dplyr::select(hh_survey_id=hh_id, hlt_pt = frequency_unit) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_pt = as.numeric(as.factor(hlt_pt))) %>% # get as numeric
+  group_by(hh_survey_id) %>%
+  summarise(hlt_pt = ifelse(length( # recode
+  hlt_pt[!(hlt_pt%in%c(4,8,26,28,30,35:43))])>0,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+#hwb_tmp$hlt_pt[is.na(hwb_tmp$hlt_pt)] <- 0 # assuming NAs are zero
+
+## LIVING STANDARDS
+
+# ls_elec
+# no data
+hwb_tmp$ls_elec <- NA
+
+# ls_san
+# The household’s sanitation facility is not flush toilet or latrine, or ventilated improved pit or composting toilet
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,ls_san = bathroom_type) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_san = ifelse(as.numeric(as.factor(ls_san)) %in% c(6,7,8),1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_wat
+# Is not piped water, public tap, borehole or pump, protected well, protected spring or rainwater
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,wat1=water_source_wet_season,wat2=water_source_dry_season) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(wat1 = ifelse(as.numeric( # convert vars to numeric then recode
+    as.factor(wat1)) %in% c(2,12,13),0,1)) %>%
+    mutate(wat2 = ifelse(as.numeric(
+    as.factor(wat2)) %in% c(2,6,7,9,11,17),0,1)) %>%
+  mutate(ls_wat = ifelse(rowSums(dplyr::select(.,wat1,wat2),na.rm=T)==2,1,0)) %>% # recode
+  dplyr::select(hh_survey_id,ls_wat) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,wl=wall_material,rf=roof_material,fl=floor_material) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(wl = ifelse(as.numeric(as.factor(wl)) %in% # recode as numeric
+                       c(1,4,8,9,12,13,15:18,24,27,28),0,1)) %>%
+  mutate(rf = ifelse(as.numeric(as.factor(rf)) %in% # recode as numeric
+                       c(1,2,6,7,8,9,10),0,1)) %>%
+  mutate(fl = ifelse(as.numeric(as.factor(fl)) %in% # recode as numeric
+                       c(1,2,6),0,1)) %>%
+  mutate(ls_hse = ifelse(rowSums(dplyr::select(.,wl,rf,fl),na.rm=T)>=2,1,0)) %>% # make variable
+  dplyr::select(hh_survey_id,ls_hse) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# ls_fuel
+# The household cooks with dung or wood
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,ls_fuel = principal_fuel) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_fuel = ifelse(as.numeric(factor(ls_fuel)) %in% c(1:4),0,1))%>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- ac_hh$i_asset %>%
+  dplyr::select(hh_survey_id=hh_id,ls_ast=asset_type) %>% # no computer
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_ast = as.numeric(factor(ls_ast))) %>% # make numeric codes
+  group_by(hh_survey_id) %>%
+  summarise(ls_ast = ifelse(length(ls_ast[ # recode
+    ls_ast %in% c(30,50,55,95,108,122,140,153)])>1,1,0))%>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: > 1ha agricultural land; fishing vessel; livestock
+tmp <- ac_hh$g_land_extra.csv %>% # get land
+  dplyr::select(hh_survey_id=hh_id,area_owned) %>%
+  mutate(area_owned = ifelse(area_owned>=1,1,0)) # recode
+hwb_tmp <- ac_hh$h_livestock %>% # get livestock
+  dplyr::select(hh_survey_id=hh_id,quantity) %>%
+  right_join(tmp) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(lv_pas = ifelse(rowSums(dplyr::select(.,-hh_survey_id),na.rm=T)>0,1,0)) %>% # recode again
+  group_by(hh_survey_id) %>%
+  summarise(lv_pas= ifelse(sum(lv_pas,na.rm=T)>0,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ac_pa <- ac_hh$g_land_extra.csv %>% # get land
+#   dplyr::select(hh_survey_id=hh_id,area_owned)
+# ac_pa <- merge(ac_pa,ac_hh$a_household[c("hh_survey_id", "village","district")],
+#                by="hh_survey_id", all.x = T)
+# write.csv(ac_pa,"ac_pa.csv")
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,rk_exp=household_shortfall) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rk_exp = ifelse(as.numeric(factor(rk_exp))==1,0,1))%>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## SUBJECTIVE WELLBEING
+# swb
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id, swb=subj_wellbeing_life_general) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(swb= as.character(swb)) %>% # make character
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,st1=receive_advice,st2=farmers_assoc_member) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(st1 = ifelse(as.numeric(factor(st1))==2,0,1)) %>% # recode underlying vars
+  mutate(st2 = ifelse(as.numeric(factor(st2))==1,0,1)) %>%
+  mutate(rwb_cm_st = ifelse(rowSums(dplyr::select(.,st1,st2),na.rm=T)>0,1,0)) %>%
+  dplyr::select(hh_survey_id,rwb_cm_st) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Community agency
+# rwb_cm_ag
+# Disatissfied (or below) with friendships or community support
+hwb_tmp <- ac_hh$a_household %>%
+  dplyr::select(hh_survey_id,rwb_cm_ag=subj_wellbeing_treatment_of_family) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_cm_ag = ifelse(as.numeric(factor(rwb_cm_ag)) %in% c(1,2,4),0,1))  %>%
+  dplyr::select(hh_survey_id,rwb_cm_ag) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp$rwb_fm_ag <- as.numeric(NA) # no data
+
+## c) Check variables and tidy  ###################################
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# update id name
+names(hwb_tmp)[names(hwb_tmp)=="hh_survey_id"] <- "pj_hhid"
+hwb_tmp$pj_hhid <- as.character(hwb_tmp$pj_hhid)
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(ac_hh,hwb_tmp)
+
+```
+
+**9. SENTINEL **
+```{r sentinel, message = FALSE, warning = FALSE}
+
+#### a) get data in list of csvs #####################
+
+sen <- list()
+nm <- c("sett","assoc","for","prod","hh","af")
+for(i in 1:6){
+  sen[[i]] <- openxlsx::read.xlsx("../data/raw/sentinel/ATREE-WGSL_Data.xlsx",
+                 sheet = i, colNames=TRUE)
+  names(sen)[i] <- nm[i]
+  sen[[i]] <- as.data.frame(sapply(sen[[i]],function(x) gsub("  .*","",x))) # convert weird spaces to NAs
+  sen[[i]][sen[[i]]==""] <- NA
+  sen[[i]][sen[[i]]==" "] <- NA
+  sen[[i]][sen[[i]]==-96] <- NA
+  
+  sen[[i]][sen[[i]]=="CHAMARAJANAGARA"] <- "CHAMARAJANAGAR" # fix some names
+  sen[[i]][sen[[i]]=="Chamarajanagar"] <- "CHAMARAJANAGAR"
+  sen[[i]][sen[[i]]=="Kodagu"] <- "KODAGU"
+  
+}
+
+sen$hh$IDNO <- paste(sen$hh$HHID,"_",sen$hh$SID,sep="") # make unique hh id vil + site
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(
+  IDNO = as.character(sen$hh$IDNO), # unique id vil + site
+  pjnm = "se",
+  cn = "IND",
+  yr = 2014,
+  admn1 = NA, # to add name from spatial data
+  admn2 = as.character(sen$hh$HDNAME), # to add name from spatial data
+  admn3 = NA, # to add name from spatial data
+  admn4 = NA, # to add name from spatial data
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = as.character(sen$hh$SID), 
+  ses = NA, # to add from other data
+  gnd = sen$hh$RESGEN,
+  rsp_age = as.numeric(as.character(sen$hh$HHMAGE_01))
+)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("male", "female"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,starts_with("HHMAGE_"),starts_with("HHMHGRADE_")) %>%
+  gather(v, value, HHMAGE_01:HHMHGRADE_12) %>% # reshape
+  separate(v, c("var", "col")) %>%
+  arrange(IDNO) %>%
+  spread(var, value) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(edu = as.numeric(factor(HHMHGRADE))) %>% # make schooling a factor
+  mutate_at(c("HHMAGE"), as.numeric) %>%
+  group_by(IDNO) %>% 
+  summarise(edu_yrs = ifelse(length(
+    HHMAGE[edu %in% c(1:5,22:23,27:31,33:64)]>=10)>0,0,1)) %>%
+  dplyr::select(IDNO,edu_yrs) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,starts_with("HHMAGE_"),starts_with("HHMSCHCATT_")) %>%
+  gather(v, value, HHMAGE_01:HHMSCHCATT_12) %>% # reshape
+  separate(v, c("var", "col")) %>%
+  arrange(IDNO) %>%
+  spread(var, value) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(c("HHMAGE","HHMSCHCATT"), as.numeric) %>%
+  group_by(IDNO) %>%
+  summarise(edu_chld_att = ifelse(
+    length(HHMSCHCATT[HHMAGE >= 6 & HHMAGE <=10] %in% c(2))>0,0,1))  %>% # ifelse recode
+  dplyr::select(IDNO,edu_chld_att) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## HEALTH
+
+# hlt_chld_mt
+# Severe illness in family in last year
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,starts_with("SHCK11")) %>%
+  mutate(hlt_chld_mt=ifelse(SHCK11==1,0,1)) %>%
+  dplyr::select(IDNO,hlt_chld_mt) %>%
+  full_join(hwb_tmp,.)
+
+# hlt_fd_sec
+# Reported not having enough to eat in the last 12 months
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,	FSHRTGYR) %>%
+  { . ->> vrs } %>% # keep vars
+  #mutate_at(vars(starts_with("FSHRTGYR")), as.numeric) %>%
+  mutate(hlt_fd_sec = ifelse(FSHRTGYR==1,0,1)) %>%
+  dplyr::select(IDNO,hlt_fd_sec) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,hlt_pt=FOODTYP5FTYPE_CONS) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(hlt_pt = ifelse(hlt_pt==0,0,1)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVING STANDARDS
+
+# ls_elec
+# A1: Main source of light is not electric mains
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO, ls_elec = HHLSRCE) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_elec = ifelse(ls_elec==1,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_san
+# The household’s sanitation facility is not flush toilet or latrine, or ventilated improved pit or composting toilet
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO, ls_san = TLTFCTY) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_san = as.numeric(as.factor(ls_san))) %>% # make numeric codes
+  mutate(ls_san = ifelse(ls_san %in% c(1,7:9),1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_wat
+# Is not piped water, public tap, borehole or pump, protected well, protected spring or rainwater
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO, ls_wat = H20SCE) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_wat = as.numeric(as.factor(ls_wat))) %>% # make numeric codes
+  mutate(ls_wat = ifelse(ls_wat %in% c(1:2,4),1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO, wl=WALLMTL, fl = FLRMTL) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(wl = ifelse(wl %in% c(11,12,14,15),0,1)) %>% # recode underlying vars
+  mutate(fl = ifelse(fl %in% c(4:6),0,1)) %>%  
+  mutate(ls_hse = ifelse(rowSums(dplyr::select(.,wl,fl),na.rm=T)==2,1,0)) %>%
+  dplyr::select(IDNO,ls_hse) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# ls_fuel
+# The household cooks with dung or wood
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO, ls_fuel =HHCKNFUEL) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_fuel = ifelse(ls_fuel %in% c(1,6:8),0,1)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- sen$hh %>% # no telephone
+  dplyr::select(IDNO,ANOOWND_05,ANOOWND_06,ANOOWND_18,ANOOWND_17,ANOOWND_04) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(starts_with("ANO")), # recode all underlying vars
+            .funs=list(~ ifelse(.==0,0,1))) %>%
+  mutate(ls_ast = ifelse(rowSums(dplyr::select(.,starts_with("ANO")),na.rm=T)>1,
+                         1,0)) %>% # recode
+  dplyr::select(IDNO,ls_ast) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: > 1ha agricultural land; fishing vessel; livestock
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,starts_with("PTENURE_"),starts_with("ESTNO_"))%>% 
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(starts_with("PTENURE_")), # make underlying vars numeric codes then recode
+            .funs=list(~ ifelse(as.numeric(factor(.)) %in% c(1,2),1,0))) %>%
+  mutate_at(.vars=vars(starts_with("ESTNO_")), # make underlying vars numeric codes then recode
+            .funs=list(~ ifelse(as.numeric(factor(.))>1,1,0))) %>%
+  mutate(lv_pas = ifelse(rowSums(dplyr::select(.,-IDNO),na.rm=T)>0,1,0)) %>%
+  dplyr::select(IDNO,lv_pas) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,SHCK1:SHCKOTR) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(SHCKOTR = ifelse(!is.na(SHCKOTR),2,1)) %>% # align other field code
+  mutate_at(.vars=vars(starts_with("SHC")), # recode all underlying vars
+            .funs=list(~ ifelse(.==1,0,1))) %>%
+  mutate(rk_exp = ifelse(rowSums(dplyr::select(.,starts_with("SHC")),na.rm=T)<13,
+                         1,0)) %>%  # recode
+  dplyr::select(IDNO, rk_exp) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## SUBJECTIVE WELLBEING
+# swb
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO, swb = WLIFE) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(swb = as.character(factor(swb,labels=c(# add labels and make character
+    "Very satisfied",
+    "Satisfied",
+    "Neither satisfied nor dissatisfied",
+    "Dissatisfied",
+    "Very dissatisfied")))) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,RTVGOV,CRTV_VPOS) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate_at(.vars=vars(RTVGOV,CRTV_VPOS), # recode all underlying vars
+            .funs=list(~ ifelse(.==1,1,0))) %>%
+  mutate(rwb_cm_st = ifelse(rowSums(dplyr::select(.,RTVGOV,CRTV_VPOS),na.rm=T)>0,
+                         1,0)) %>%  # recode
+  dplyr::select(IDNO,rwb_cm_st) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Community agency
+# rwb_cm_ag
+# Disatissfied (or below) with friendships or community support
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO,rwb_cm_ag=WCSPRT) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_cm_ag = ifelse(rwb_cm_ag %in% c(4,5),0,1)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No close relatives in the village
+hwb_tmp <- sen$hh %>%
+  dplyr::select(IDNO, rwb_fm_st = HHRTVS) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_fm_st = ifelse(rwb_fm_st==1,1,0)) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp$rwb_fm_ag <- as.numeric(NA) # no data
+
+## c) Check variables and tidy  ###################################
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# update id name
+names(hwb_tmp)[names(hwb_tmp)=="IDNO"] <- "pj_hhid"
+hwb_tmp$pj_hhid <- as.character(hwb_tmp$pj_hhid)
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(sen,hwb_tmp)
+
+```
+
+**10. ASSETS - COLOMBIA **
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+# ASSETS did surveys in two rounds. To save on code, for each survey section, I combine the csv into one dataframe with a unique response id (wave + hh id). Values for 
+# each wave can be seperated or aggregated later as needed
+
+nm1 <- list.files("../data/raw/assets_colombia_initial_unpublished/Colombia/W1CSV",pattern="*.csv",full.names=T)
+nm2 <- list.files("../data/raw/assets_colombia_initial_unpublished/Colombia/W2CSV",pattern="*.csv",full.names=T)
+asc_hh <- list()
+for (i in 1:length(nm1)){
+  wv1 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm1[i])
+  wv1$wv <- 1 # wave number
+  wv1$IDNO <- paste(wv1$wv,wv1$Resguardo, wv1$Comunidad, 
+                    wv1$Hogar,sep="_") # unique response ID
+  wv2 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm2[i])
+  names(wv2) <- gsub( "W2", "", names(wv2)) # fix wv2 names
+  wv2$wv <- 2 # wave number
+  wv2$IDNO <- paste(wv2$wv,wv2$Resguardo, wv2$Comunidad, 
+                    wv2$Hogar,sep="_") # unique response ID
+  asc_hh[[i]] <- plyr::rbind.fill(wv1,wv2)
+  names(asc_hh)[i] <- strsplit(nm1[i],"/")[[1]][7]
+  names(asc_hh)[i] <- paste0(strsplit(names(asc_hh)[i],"_")[[1]][c(3,5)],collapse="_")
+  names(asc_hh)[i] <- stringr::str_sub(names(asc_hh)[i],1,-5)
+  
+  # convert NAs
+  asc_hh[[i]][asc_hh[[i]]==""] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-999"] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-998"] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-997"] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-888"] <- NA
+  asc_hh[[i]]$hhid <- paste(asc_hh[[i]]$Resguardo, # add hhid
+                            asc_hh[[i]]$Comunidad,
+                            asc_hh[[i]]$Hogar, sep="_")
+}
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  IDNO = asc_hh$A_InterviewDetails$IDNO, # wave number + hogar
+  hhid = asc_hh$A_InterviewDetails$Hogar, # for aggregating later. then remove
+  pjnm = "asc",
+  cn = as.character("COL"),
+  yr = 2014,
+  admn1 = as.character(NA), # to add name from spatial data
+  admn2 = as.character(NA), # to add name from spatial data
+  admn3 = asc_hh$A_InterviewDetails$Resguardo,
+  admn4 = asc_hh$A_InterviewDetails$Comunidad,
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = NA, 
+  ses = as.character(NA) # to add name from spatial data
+)
+
+hwb_tmp <- asc_hh$B_Roster %>%
+  dplyr::select(IDNO,gnd=b_2,rsp_age=b_5_b) %>%
+  group_by(IDNO) %>%
+  filter(row_number()==1) %>%
+  mutate(rsp_age= 2014-rsp_age) %>%
+  full_join(hwb_tmp,.)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("male","female"))) # add names to gender
+
+hwb_tmp[hwb_tmp=="Madroño"] <- "Madrono" # align some village names
+hwb_tmp[hwb_tmp=="Bakuri"] <- "Bacuri"
+hwb_tmp[hwb_tmp=="Puerto Cordoba"] <- "Pto Cordoba"
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- bind_cols(asc_hh$B_Roster[c("IDNO","b_5_b")],asc_hh$C_Education[c("c_6")]) %>%
+  { . ->> vrs } %>%  # keep vars
+  mutate(age=2014-b_5_b,edu=as.numeric(factor(c_6))) %>% 
+  group_by(IDNO) %>% 
+  summarise(edu_yrs = ifelse(length(age[edu %in% c(1:2,9:14)]>=10)>0,1,0)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- bind_cols(asc_hh$B_Roster[c("IDNO","b_5_b")],asc_hh$C_Education[c("c_8")]) %>%
+  { . ->> vrs } %>%  # keep vars
+  mutate(age=2014-b_5_b,edu=as.numeric(factor(c_8))) %>% 
+  group_by(IDNO)  %>% 
+  summarise(edu_chld_att = ifelse(length(age[edu %in% c(1)]<=12)>0,1,0))  %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## HEALTH
+
+# hlt_chld_mt
+#  Alternative 1: has any child below 5 years died in the last year
+hwb_tmp <- asc_hh$E_Maternity %>%
+  dplyr::select(IDNO,hlt_chld_mt=e_8) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_chld_mt= as.numeric(factor(hlt_chld_mt))) %>%
+  group_by(IDNO) %>%
+  summarise(hlt_chld_mt=ifelse(c(2) %in% hlt_chld_mt,0,1)) %>% # assuming NA is No
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_fd_sec
+# Reported not having enough to eat in the last 12 months
+hwb_tmp <- asc_hh$J_FoodSecurity %>%
+  dplyr::select(IDNO,j_1_c:j_1_d) %>%
+  { . ->> vrs } %>% # keep vars
+    mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(hlt_fd_sec=ifelse(rowSums(dplyr::select(.,-IDNO),na.rm=T)>0,0,1)) %>%
+  dplyr::select(IDNO,hlt_fd_sec) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+hwb_tmp <- asc_hh$I_FoodRoster %>%
+  dplyr::select(IDNO,FoodID,i_2) %>%
+  filter(FoodID %in% # keep rows applying to meat
+           unique(FoodID)[c(1:59,185:186,189:191,199:201)]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(FoodID,i_2) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(hlt_pt=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(hlt_pt=sum(hlt_pt,na.rm=T)) %>% # summarise for HH
+  mutate(hlt_pt=ifelse(hlt_pt>0,1,0)) %>% # recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVING STANDARDS
+
+# ls_elec
+# no data
+hwb_tmp <- asc_hh$H_Housing %>%
+  dplyr::select(IDNO,ls_elec=h_20) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_elec = ifelse(ls_elec=="No",0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_san
+# The household’s sanitation facility is not flush toilet or latrine, or ventilated improved pit or composting toilet
+hwb_tmp <- asc_hh$H_Housing %>%
+  dplyr::select(IDNO, ls_san=h_32) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_san = as.numeric(factor(ls_san))) %>% # make numeric code
+  mutate(ls_san = ifelse(ls_san %in% c(1,3),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_wat
+# Is not piped water, public tap, borehole or pump, protected well, protected spring or rainwater
+hwb_tmp <- asc_hh$H_Housing %>%
+  dplyr::select(IDNO, ls_wat=h_25) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_wat = as.numeric(factor(ls_wat))) %>%  # make numeric code
+  mutate(ls_wat = ifelse(ls_wat %in% c(1,2),1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- asc_hh$H_Housing %>%
+  dplyr::select(IDNO, wl=h_5, rf= h_6, fl= h_7)  %>%
+  { . ->> vrs }  %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))))   %>% 
+  mutate(wl = ifelse(wl %in% c(3,6),1,0))  %>% # recode underlying vats
+  mutate(rf = ifelse(rf %in% c(1),1,0)) %>%
+  mutate(fl= ifelse(fl %in% c(1,7,8),1,0)) %>%
+  mutate(ls_hse = ifelse(rowSums(dplyr::select(.,-IDNO))<2,0,1)) %>% # make var
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  dplyr::select(IDNO,ls_hse) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# ls_fuel
+# The household cooks with dung or wood
+hwb_tmp <- asc_hh$H_Housing %>%
+  dplyr::select(IDNO,ls_fuel=h_9) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_fuel=as.numeric(factor(ls_fuel))) %>% # make numeric code
+  mutate(ls_fuel=ifelse(ls_fuel==1,0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- asc_hh$L_DurableGoods %>%
+  dplyr::select(IDNO,DurableGoodID,l_1) %>%
+  filter(DurableGoodID %in% # keep rows applying relevant goods
+           unique(DurableGoodID)[c(1,2,19,24,10)]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(DurableGoodID,l_1) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(ls_ast=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(ls_ast=sum(ls_ast,na.rm=T)) %>% # summarise for HH
+  mutate(ls_ast=ifelse(ls_ast>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: > 1ha agricultural land; fishing vessel; livestock
+
+res <- hwb_tmp[1]
+tmp <- asc_hh$AGa_AgriPlots %>% # land
+  dplyr::select(IDNO,AGa_0) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(AGa_0 = ifelse(AGa_0=="Yes",1,0)) %>% # recode
+  right_join(res,by="IDNO")
+tmp <- asc_hh$AGe_Livestock %>% # land
+  dplyr::select(IDNO,AGe_1) %>% # livestock
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(AGe_1 = ifelse(AGe_1=="Yes",1,0)) %>% # recode
+  right_join(tmp,by="IDNO")
+tmp <- asc_hh$L_DurableGoods %>% # boats
+  dplyr::select(IDNO,DurableGoodID,l_1) %>%
+  filter(DurableGoodID %in% # keep rows applying relevant goods
+           unique(DurableGoodID)[c(20:23)]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(DurableGoodID,l_1) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(bt=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(bt=sum(bt,na.rm=T)) %>% # summarise for HH
+  mutate(bt=ifelse(bt>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  right_join(tmp,by="IDNO")  # add to other cols
+tmp$lv_pas <- ifelse(rowSums(tmp[-1],na.rm=T)>0,1,0) # using base R because dplyr not working for some reason
+
+hwb_tmp <- tmp %>% # bind
+  dplyr::select(IDNO,lv_pas) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp <- asc_hh$R_WellbeingShockRoster%>%
+  dplyr::select(IDNO,Shock_ID, r_20_a) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(Shock_ID, r_20_a) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(rk_exp=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(rk_exp=sum(rk_exp,na.rm=T)) %>% # summarise for HH
+  mutate(rk_exp=ifelse(rk_exp>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## SUBJECTIVE WELLBEING
+# swb
+hwb_tmp <- asc_hh$R_WellBeing %>%
+  dplyr::select(IDNO,swb=r_12) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(swb= as.character(swb)) %>% # make character
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+ # codes
+lvls(vrs)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- plyr::rbind.fill(asc_hh$AGb_AgriInputsRoster[c("IDNO","AGb_14_b")],      
+           asc_hh$AGc_AgriSeedsRoster[c("IDNO","AGc_15_b")],
+           asc_hh$AGe_LivestockRoster[c("IDNO","AGe_12")]) %>%
+    mutate_all(funs(ifelse(is.na(.), 0, .))) %>% # NAs mean zero here
+    mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+    mutate(rwb_cm_st=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>%  # get row sums
+    group_by(IDNO) %>%
+    summarise(rwb_cm_st=sum(rwb_cm_st,na.rm=T)) %>% # summarise for HH
+    mutate(rwb_cm_st=ifelse(rwb_cm_st>0,1,0)) %>% # recode
+    group_by(IDNO) %>% 
+    filter(row_number()==1) %>%  
+    full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Community agency
+# rwb_cm_ag
+# Disatissfied (or below) with friendships or community support
+hwb_tmp <- asc_hh$R_WellBeing %>%
+  dplyr::select(IDNO,rwb_cm_ag=r_9) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_cm_ag = ifelse(as.numeric(factor(rwb_cm_ag)) %in% c(2,5),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp <- asc_hh$R_WellBeing %>%
+  dplyr::select(IDNO,rwb_fm_ag=r_2) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_fm_ag = ifelse(as.numeric(factor(rwb_fm_ag)) %in% c(2,5),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## c) Check variables and tidy  ###################################
+
+# make values annual as needed
+hwb_tmp <- hwb_tmp %>%
+  group_by(hhid) %>%
+  summarise(
+    pj_hhid = as.character(getmode(IDNO)),
+    pjnm = as.character(getmode(pjnm)),
+    cn = as.character(getmode(cn)),
+    yr = getmode(yr),
+    admn1 = as.character(getmode(admn1)),
+    admn2 = as.character(getmode(admn2)),
+    admn3 = as.character(getmode(admn3)),
+    admn4 = as.character(getmode(admn4)),
+    admn1n = as.character(getmode(admn1)), # admin division number codes
+    admn2n = as.character(getmode(admn2)), 
+    admn3n = as.character(getmode(admn3)), 
+    admn4n = as.character(getmode(admn4)), 
+    ses = as.character(getmode(ses)),
+    gnd = as.character(getmode(gnd)),
+    rsp_age = getmode(rsp_age),
+    edu_yrs = trunc(median(edu_yrs,na.rm=T)), 
+    edu_chld_att = trunc(median(edu_chld_att,na.rm=T)),
+    hlt_chld_mt = trunc(median(hlt_chld_mt,na.rm=T)),
+    hlt_fd_sec = trunc(median(hlt_fd_sec, na.rm=T)),
+    hlt_pt = trunc(median(hlt_pt, na.rm=T)),
+    ls_elec = trunc(median(ls_san, na.rm=T)),
+    ls_san = trunc(median(ls_san, na.rm=T)),
+    ls_wat = trunc(median(ls_wat, na.rm=T)),
+    ls_hse = trunc(median(ls_hse, na.rm=T)),
+    ls_fuel = trunc(median(ls_fuel, na.rm=T)),
+    ls_ast = trunc(median(ls_ast, na.rm=T)),
+    lv_pas = trunc(median(lv_pas, na.rm=T)),
+    rk_exp = trunc(median(lv_pas, na.rm=T)),
+    swb = as.character(getmode(swb)),
+    rwb_cm_st = trunc(median(rwb_cm_st, na.rm=T)),
+    rwb_cm_ag = trunc(median(rwb_cm_ag, na.rm=T)),
+    rwb_fm_st = trunc(median(rwb_fm_st, na.rm=T)),
+    rwb_fm_ag = trunc(median(rwb_fm_ag, na.rm=T))
+  )
+hwb_tmp$hhid <- NULL
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# remove wave from hhid
+hwb_tmp$pj_hhid <- substring(hwb_tmp$pj_hhid,3)
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(asc_hh,hwb_tmp,wv1,wv2,vrs,tmp)
+
+```
+
+**11. ASSETS - PERU **
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+# ASSETS did surveys in two rounds. To save on code, for each survey section, I combine the csv into one dataframe with a unique response id (wave + hh id). Values for 
+# each wave can be seperated or aggregated later as needed
+
+nm1 <- list.files("../data/raw/assets_peru_initial_unpublished/Peru/Wave1/CSV",
+                  pattern="*.csv",full.names=T)
+nm2 <- list.files("../data/raw/assets_peru_initial_unpublished/Peru/Wave2/CSV",
+                  pattern="*.csv",full.names=T)
+asp_hh <- list()
+for (i in 1:length(nm1)){
+  wv1 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm1[i])
+  wv1$wv <- 1 # wave number
+  wv1$IDNO <- paste(wv1$wv,wv1$Pueblo, 
+                    wv1$Hogar,sep="_") # unique response ID
+  wv2 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm2[i])
+  names(wv2) <- gsub( "W2", "", names(wv2)) # fix wv2 names
+  wv2$wv <- 2 # wave number
+  wv2$IDNO <- paste(wv2$wv,wv2$Pueblo, 
+                    wv2$Hogar,sep="_") # unique response ID
+  asp_hh[[i]] <- plyr::rbind.fill(wv1,wv2)
+  names(asp_hh)[i] <- strsplit(nm1[i],"/")[[1]][8]
+  names(asp_hh)[i] <- paste0(strsplit(names(asp_hh)[i],"_")[[1]][c(3,5)],collapse="_")
+  names(asp_hh)[i] <- stringr::str_sub(names(asp_hh)[i],1,-5)
+  
+  # convert NAs
+  asp_hh[[i]][asp_hh[[i]]==""] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-999"] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-998"] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-997"] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-888"] <- NA
+  asp_hh[[i]]$hhid <- paste(asp_hh[[i]]$Pueblo, # add hhid
+                            asp_hh[[i]]$Hogar, sep="_")
+}
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  IDNO = asp_hh$A_InterviewDetails$IDNO, # wave number + hogar
+  hhid = asp_hh$A_InterviewDetails$Hogar, # for aggregating later. then remove
+  pjnm = "asp",
+  cn = as.character("PER"),
+  yr = 2014,
+  admn1 = as.character(NA), # to add name from spatial data
+  admn2 = as.character(NA), # to add name from spatial data
+  admn3 = as.character(NA),
+  admn4 = asp_hh$A_InterviewDetails$Pueblo,
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = NA, 
+  ses = as.character(NA) # to add name from spatial data
+)
+
+hwb_tmp <- asp_hh$B_Roster %>%
+  dplyr::select(IDNO,gnd=b_2,rsp_age=b_5_b) %>%
+  group_by(IDNO) %>%
+  filter(row_number()==1) %>%
+  mutate(rsp_age= 2014-rsp_age) %>%
+  full_join(hwb_tmp,.)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("male","female"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- full_join(asp_hh$B_Roster[,c("IDNO","HHMemberID","b_5_b")],asp_hh$C_Education[,c("IDNO","HHMemberID","c_6")], 
+                     by = c("IDNO","HHMemberID")) %>%
+  { . ->> vrs } %>%  # keep vars
+  mutate(age=2014-b_5_b,edu=as.numeric(factor(c_6))) %>% 
+  group_by(IDNO) %>%
+  summarise(edu_yrs = ifelse(length(age[edu %in% c(4,11:18)]>=10)>0,1,0)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- full_join(asp_hh$B_Roster[,c("IDNO","HHMemberID","b_5_b")],asp_hh$C_Education[,c("IDNO","HHMemberID","c_8")], 
+                     by = c("IDNO","HHMemberID")) %>%
+  { . ->> vrs } %>%  # keep vars
+  mutate(age=2014-b_5_b,edu=as.numeric(factor(c_8))) %>%
+  group_by(IDNO)  %>% 
+  summarise(edu_chld_att = ifelse(length(age[edu %in% c(1)]<=12)>0,1,0)) %>%  # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## HEALTH
+
+# hlt_chld_mt
+#  Alternative 1: has any child below 5 years died in the last year
+hwb_tmp <- asp_hh$E_Maternity %>%
+  dplyr::select(IDNO,hlt_chld_mt=e_8) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_chld_mt= as.numeric(factor(hlt_chld_mt))) %>%
+  group_by(IDNO) %>%
+  summarise(hlt_chld_mt=ifelse(c(2) %in% hlt_chld_mt,0,1)) %>% # assuming NA is No
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_fd_sec
+# Reported not having enough to eat in the last 12 months
+hwb_tmp <- asp_hh$J_FoodSecurity %>%
+  dplyr::select(IDNO,j_1_c:j_1_d) %>%
+  { . ->> vrs } %>% # keep vars
+    mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(hlt_fd_sec=ifelse(rowSums(dplyr::select(.,-IDNO),na.rm=T)>0,0,1)) %>%
+  dplyr::select(IDNO,hlt_fd_sec) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+pt <- delta_locs <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                       "../data/proc/initial/asm_protein_list.csv")
+hwb_tmp <- asp_hh$I_FoodRoster %>%
+  dplyr::select(IDNO,FoodID,i_2) %>%
+  filter(FoodID %in% # keep rows applying to meat
+           unique(FoodID)[pt$X[pt$meat==1]]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(FoodID,i_2) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(hlt_pt=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(hlt_pt=sum(hlt_pt,na.rm=T)) %>% # summarise for HH
+  mutate(hlt_pt=ifelse(hlt_pt>0,1,0)) %>% # recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVING STANDARDS
+
+# ls_elec
+# no data
+hwb_tmp <- asp_hh$H_Housing %>%
+  dplyr::select(IDNO,ls_elec=h_20) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_elec = ifelse(ls_elec=="No",0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_san
+# The household’s sanitation facility is not flush toilet or latrine, or ventilated improved pit or composting toilet
+hwb_tmp <- asp_hh$H_Housing %>%
+  dplyr::select(IDNO, ls_san=h_32) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_san = as.numeric(factor(ls_san))) %>% # make numeric code
+  mutate(ls_san = ifelse(ls_san %in% c(1,2),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_wat
+# Is not piped water, public tap, borehole or pump, protected well, protected spring or rainwater
+hwb_tmp <- asp_hh$H_Housing %>%
+  dplyr::select(IDNO, ls_wat=h_25) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_wat = as.numeric(factor(ls_wat))) %>%  # make numeric code
+  mutate(ls_wat = ifelse(ls_wat %in% c(1,2,7,20,21),0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- asp_hh$H_Housing %>%
+  dplyr::select(IDNO, wl=h_5, rf= h_6, fl= h_7)  %>%
+  { . ->> vrs }  %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))))   %>% 
+  mutate(wl = ifelse(wl %in% c(3,6),1,0))  %>% # recode underlying vats
+  mutate(rf = ifelse(rf %in% c(1),1,0)) %>%
+  mutate(fl= ifelse(fl %in% c(1,7,8),1,0)) %>%
+  mutate(ls_hse = ifelse(rowSums(dplyr::select(.,-IDNO))<2,0,1)) %>% # make var
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  dplyr::select(IDNO,ls_hse) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# ls_fuel
+# The household cooks with dung or wood
+hwb_tmp <- asp_hh$H_Housing %>%
+  dplyr::select(IDNO,ls_fuel=h_9) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_fuel=as.numeric(factor(ls_fuel))) %>% # make numeric code
+  mutate(ls_fuel=ifelse(ls_fuel %in% c(2,3,5),0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- asp_hh$L_DurableGoods %>%
+  dplyr::select(IDNO,DurableGoodID,l_1) %>%
+  filter(DurableGoodID %in% # keep rows applying relevant goods
+           unique(DurableGoodID)[c(1,2,16,19,25,26)]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(DurableGoodID,l_1) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(ls_ast=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(ls_ast=sum(ls_ast,na.rm=T)) %>% # summarise for HH
+  mutate(ls_ast=ifelse(ls_ast>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: > 1ha agricultural land; fishing vessel; livestock
+
+res <- hwb_tmp[1]
+tmp <- asp_hh$AGa_AgriPlots %>% # land
+  dplyr::select(IDNO,AGa_0) %>%
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(AGa_0 = ifelse(AGa_0=="Yes",1,0)) %>% # recode
+  right_join(res,by="IDNO")
+tmp <- asp_hh$AGe_Livestock %>% # land
+  dplyr::select(IDNO,AGe_1) %>% # livestock
+  drop_na() %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(AGe_1 = ifelse(AGe_1=="Yes",1,0)) %>% # recode
+  right_join(tmp,by="IDNO")
+tmp <- asp_hh$L_DurableGoods %>% # boats
+  dplyr::select(IDNO,DurableGoodID,l_1) %>%
+  filter(DurableGoodID %in% # keep rows applying relevant goods
+           unique(DurableGoodID)[c(20:23)]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(DurableGoodID,l_1) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(bt=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(bt=sum(bt,na.rm=T)) %>% # summarise for HH
+  mutate(bt=ifelse(bt>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  right_join(tmp,by="IDNO")  # add to other cols
+tmp$lv_pas <- ifelse(rowSums(tmp[-1],na.rm=T)>0,1,0) # using base R because dplyr not working for some reason
+
+hwb_tmp <- tmp %>% # bind
+  dplyr::select(IDNO,lv_pas) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp <- asp_hh$R_Wellb%>%
+  dplyr::select(IDNO,Shock_ID, r_20_a) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(Shock_ID, r_20_a) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(rk_exp=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(rk_exp=sum(rk_exp,na.rm=T)) %>% # summarise for HH
+  mutate(rk_exp=ifelse(rk_exp>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## SUBJECTIVE WELLBEING
+# swb
+hwb_tmp <- asp_hh$R_Wellbeing %>%
+  dplyr::select(IDNO,swb=r_12) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(swb= as.character(swb)) %>% # make character
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+ # codes
+lvls(vrs)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- plyr::rbind.fill(asp_hh$AGb_AgriInputsRoster[c("IDNO","AGb_14_b")],      
+           asp_hh$AGc_AgriSeedsRoster[c("IDNO","AGc_15_b")],
+           asp_hh$AGe_LivestockRoster[c("IDNO","AGe_12")]) %>%
+    mutate_all(funs(ifelse(is.na(.), 0, .))) %>% # NAs mean zero here
+    mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+    mutate(rwb_cm_st=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>%  # get row sums
+    group_by(IDNO) %>%
+    summarise(rwb_cm_st=sum(rwb_cm_st,na.rm=T)) %>% # summarise for HH
+    mutate(rwb_cm_st=ifelse(rwb_cm_st>0,1,0)) %>% # recode
+    group_by(IDNO) %>% 
+    filter(row_number()==1) %>%  
+    full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Community agency
+# rwb_cm_ag
+# Disatissfied (or below) with friendships or community support
+hwb_tmp <- asp_hh$R_Wellbeing %>%
+  dplyr::select(IDNO,rwb_cm_ag=r_9) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_cm_ag = ifelse(as.numeric(factor(rwb_cm_ag)) %in% c(2,5),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp <- asp_hh$R_Wellbeing %>%
+  dplyr::select(IDNO,rwb_fm_ag=r_2) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_fm_ag = ifelse(as.numeric(factor(rwb_fm_ag)) %in% c(2,5),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## c) Check variables and tidy  ###################################
+
+# make values annual as needed
+hwb_tmp <- hwb_tmp %>%
+  group_by(hhid) %>%
+  summarise(
+    pj_hhid = as.character(getmode(IDNO)),
+    pjnm = as.character(getmode(pjnm)),
+    cn = as.character(getmode(cn)),
+    yr = getmode(yr),
+    admn1 = as.character(getmode(admn1)),
+    admn2 = as.character(getmode(admn2)),
+    admn3 = as.character(getmode(admn3)),
+    admn4 = as.character(getmode(admn4)),
+    admn1n = as.character(getmode(admn1)), # admin division number codes
+    admn2n = as.character(getmode(admn2)), 
+    admn3n = as.character(getmode(admn3)), 
+    admn4n = as.character(getmode(admn4)), 
+    ses = as.character(getmode(ses)),
+    gnd = as.character(getmode(gnd)),
+    rsp_age = getmode(rsp_age),
+    edu_yrs = trunc(median(edu_yrs,na.rm=T)), 
+    edu_chld_att = trunc(median(edu_chld_att,na.rm=T)),
+    hlt_chld_mt = trunc(median(hlt_chld_mt,na.rm=T)),
+    hlt_fd_sec = trunc(median(hlt_fd_sec, na.rm=T)),
+    hlt_pt = trunc(median(hlt_pt, na.rm=T)),
+    ls_elec = trunc(median(ls_san, na.rm=T)),
+    ls_san = trunc(median(ls_san, na.rm=T)),
+    ls_wat = trunc(median(ls_wat, na.rm=T)),
+    ls_hse = trunc(median(ls_hse, na.rm=T)),
+    ls_fuel = trunc(median(ls_fuel, na.rm=T)),
+    ls_ast = trunc(median(ls_ast, na.rm=T)),
+    lv_pas = trunc(median(lv_pas, na.rm=T)),
+    rk_exp = trunc(median(lv_pas, na.rm=T)),
+    swb = as.character(getmode(swb)),
+    rwb_cm_st = trunc(median(rwb_cm_st, na.rm=T)),
+    rwb_cm_ag = trunc(median(rwb_cm_ag, na.rm=T)),
+    rwb_fm_st = trunc(median(rwb_fm_st, na.rm=T)),
+    rwb_fm_ag = trunc(median(rwb_fm_ag, na.rm=T))
+  )
+hwb_tmp$hhid <- NULL
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+# remove wave from hhid
+hwb_tmp$pj_hhid <- substring(hwb_tmp$pj_hhid,3)
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(asp_hh,hwb_tmp,wv1,wv2,vrs,tmp)
+
+```
+
+**12. ASSETS - MALAWI **
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+# ASSETS did surveys in two rounds. To save on code, for each survey section, I combine the csv into one dataframe with a unique response id (wave + hh id). Values for 
+# each wave can be seperated or aggregated later as needed
+nm1 <- list.files("../data/raw/assets_malawi_initial_unpublished/Wave1",
+                  pattern="*.csv",full.names=T)
+nm2 <- list.files("../data/raw/assets_malawi_initial_unpublished/Wave2",
+                  pattern="*.csv",full.names=T)
+asm_hh <- list()
+for (i in 1:length(nm1)){
+  wv1 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm1[i])
+  wv1$wv <- 1 # wave number
+  wv1$IDNO <- paste(wv1$wv,wv1$FINALCODE,sep="_") # unique response ID
+  wv2 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm2[i])
+  names(wv2) <- gsub( "W2", "", names(wv2)) # fix wv2 names
+  wv2$wv <- 2 # wave number
+  wv2$IDNO <- paste(wv2$wv,wv2$Hogar,sep="_") # unique response ID
+  asm_hh[[i]] <- plyr::rbind.fill(wv1,wv2)
+  names(asm_hh)[i] <- strsplit(nm1[i],"/")[[1]][6]
+  names(asm_hh)[i] <- paste0(strsplit(names(asm_hh)[i],"_")[[1]][4],collapse="_")
+  names(asm_hh)[i] <- stringr::str_sub(names(asm_hh)[i],1,-5)
+  
+  # convert NAs
+  asm_hh[[i]][asm_hh[[i]]==""] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-999"] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-998"] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-997"] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-888"] <- NA
+  # asm_hh[[i]]$hhid <- paste(asm_hh[[i]]$Pueblo, # add hhid
+  #                           asm_hh[[i]]$Hogar, sep="_")
+}
+
+# make ID look up table for aggregation
+# tmp <- asm_hh$HHRoster %>%
+#   dplyr::select(sett_nm2 = Village, sett_nm1 = Pueblo, pj_hhid = IDNO) %>%
+#   mutate(pj_hhid = gsub(".*_","",pj_hhid)) %>%
+#   mutate(sett_nm = dplyr::coalesce(sett_nm1,sett_nm2)) %>%
+#   mutate(sett_pjid = sett_nm) %>%
+#   dplyr::select(-sett_nm1,-sett_nm2) %>%
+#   unique()
+# write.csv(tmp,"asm_hhid.csv")
+
+# add extra dataframes not included in above
+nmex <- list.files("../data/raw/assets_malawi_initial_unpublished/Wave1/extra",
+                  pattern="*.csv",full.names=T)
+for (i in 1:length(nmex)){
+  wv1 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nmex[i])
+  wv1$wv <- 1 # wave number
+  wv1$IDNO <- paste(wv1$wv,wv1$FINALCODE,sep="_") # unique response ID
+  asm_hh[[length(asm_hh)+1]] <- plyr::rbind.fill(wv1,wv2)
+  names(asm_hh)[length(asm_hh)] <- strsplit(nmex[i],"/")[[1]][7]
+  names(asm_hh)[length(asm_hh)] <- paste0(strsplit(names(asm_hh)[length(asm_hh)],"_")[[1]][4],collapse="_")
+  names(asm_hh)[length(asm_hh)] <- stringr::str_sub(names(asm_hh)[length(asm_hh)],1,-5)
+  asm_hh[[length(asm_hh)]][asm_hh[[length(asm_hh)]]==""] <- NA
+  asm_hh[[length(asm_hh)]][asm_hh[[length(asm_hh)]]=="-999"] <- NA
+  asm_hh[[length(asm_hh)]][asm_hh[[length(asm_hh)]]=="-998"] <- NA
+  asm_hh[[length(asm_hh)]][asm_hh[[length(asm_hh)]]=="-997"] <- NA
+  asm_hh[[length(asm_hh)]][asm_hh[[length(asm_hh)]]=="-888"] <- NA
+}
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+
+tmp <- unique(asm_hh$HHRoster[c("Village", "IDNO", "FINALCODE","Hogar")])
+tmp <- tmp %>%
+  mutate(hhid = dplyr::coalesce(tmp$FINALCODE, tmp$Hogar))
+
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  IDNO = tmp$IDNO, # wave number + hogar
+  hhid = tmp$hhid, # for aggregating later. then remove
+  pjnm = "asm",
+  cn = as.character("MWI"),
+  yr = 2014,
+  admn1 = as.character(NA), # to add name from spatial data
+  admn2 = as.character(NA), # to add name from spatial data
+  admn3 = as.character(NA),
+  admn4 = tmp$Village,
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = NA, 
+  ses = as.character(NA) # to add name from spatial data
+)
+
+hwb_tmp <- asm_hh$HHRoster %>%
+  dplyr::select(IDNO,gnd=b_2,rsp_age=b_5_b) %>%
+  group_by(IDNO) %>%
+  filter(row_number()==1) %>%
+  mutate(rsp_age= 2014-rsp_age) %>%
+  full_join(hwb_tmp,.)
+
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("male","female"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- full_join(asm_hh$HHRoster[,c("IDNO","HHMemberID","b_5_b")],asm_hh$HHEducation[,c("IDNO","HHMemberID","c_6")], 
+                     by = c("IDNO","HHMemberID")) %>%
+  { . ->> vrs } %>%  # keep vars
+  mutate(age=2014-b_5_b,edu=as.numeric(factor(c_6))) %>% 
+  group_by(IDNO) %>%
+  summarise(edu_yrs = ifelse(length(age[edu %in% c(8:16)]>=10)>0,1,0)) %>% # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- full_join(asm_hh$HHRoster[,c("IDNO","HHMemberID","b_5_b")],asm_hh$HHEducation[,c("IDNO","HHMemberID","c_8")], 
+                     by = c("IDNO","HHMemberID")) %>%
+  { . ->> vrs } %>%  # keep vars
+  mutate(age=2014-b_5_b,edu=as.numeric(factor(c_8))) %>%
+  group_by(IDNO)  %>% 
+  summarise(edu_chld_att = ifelse(length(age[edu %in% c(1)]<=12)>0,1,0)) %>%  # ifelse recode
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## HEALTH
+
+# hlt_chld_mt
+#  Alternative 1: has any child below 5 years died in the last year
+hwb_tmp <- asm_hh$Maternity %>%
+  dplyr::select(IDNO,hlt_chld_mt=e_8) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate(hlt_chld_mt= as.numeric(factor(hlt_chld_mt))) %>%
+  group_by(IDNO) %>%
+  summarise(hlt_chld_mt=ifelse(c(2) %in% hlt_chld_mt,0,1)) %>% # assuming NA is No
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# hlt_fd_sec
+# Reported not having enough to eat in the last 12 months
+hwb_tmp <- asm_hh$FoodSecurity %>%
+  dplyr::select(IDNO,j_1_c:j_1_d) %>%
+  { . ->> vrs } %>% # keep vars
+    mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(hlt_fd_sec=ifelse(rowSums(dplyr::select(.,-IDNO),na.rm=T)>0,0,1)) %>%
+  dplyr::select(IDNO,hlt_fd_sec) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+
+# hlt_pt
+# Did not eat meat in last week, or every week on average over period
+# pt <- delta_locs <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+#                        "../data/proc/initial/asm_protein_list.csv")
+hwb_tmp <- asm_hh$FoodMeat %>%
+  dplyr::select(IDNO,MeatID,i_12) %>%
+  group_by(IDNO) %>%
+  summarise(hlt_pt = max(as.numeric(factor(i_12)))-1) %>%
+  full_join(hwb_tmp,.)
+
+## LIVING STANDARDS
+
+# ls_elec
+hwb_tmp <- asm_hh$Housing %>%
+  dplyr::select(IDNO,ls_elec=h_20) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_elec = ifelse(ls_elec=="No",0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_san
+# The household’s sanitation facility is not flush toilet or latrine, or ventilated improved pit or composting toilet
+hwb_tmp <- asm_hh$Housing %>%
+  dplyr::select(IDNO, ls_san=h_32) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_san = as.numeric(factor(ls_san))) %>% # make numeric code
+  mutate(ls_san = ifelse(ls_san %in% c(2,3),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_wat
+# Is not piped water, public tap, borehole or pump, protected well, protected spring or rainwater
+hwb_tmp <- asm_hh$Housing %>%
+  dplyr::select(IDNO, ls_wat=h_25) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_wat = as.numeric(factor(ls_wat))) %>%  # make numeric code
+  mutate(ls_wat = ifelse(ls_wat %in% c(4,11,12,13),0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_hse
+# At least one of the three housing materials for roof, walls and floor are inadequate: the floor is of natural materials and/or the roof and/or walls are of natural or rudimentary materials
+hwb_tmp <- asm_hh$Housing %>%
+  dplyr::select(IDNO, wl=h_5, rf= h_6, fl= h_7)  %>%
+  { . ->> vrs }  %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))))   %>% 
+  mutate(wl = ifelse(wl %in% c(1,2),1,0))  %>% # recode underlying vats
+  mutate(rf = ifelse(rf %in% c(2),1,0)) %>%
+  mutate(fl= ifelse(fl %in% c(1,5),1,0)) %>%
+  mutate(ls_hse = ifelse(rowSums(dplyr::select(.,-IDNO))<2,0,1)) %>% # make var
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  dplyr::select(IDNO,ls_hse) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+  
+# ls_fuel
+# The household cooks with dung or wood
+hwb_tmp <- asm_hh$Housing %>%
+  dplyr::select(IDNO,ls_fuel=h_9) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(ls_fuel=as.numeric(factor(ls_fuel))) %>% # make numeric code
+  mutate(ls_fuel=ifelse(ls_fuel %in% c(2,3,4),0,1)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# ls_ast
+# The household does not own more than one of the following items: radio, TV, telephone, bike, motorbike computer, or refrigerator (conditional on not owning a car or truck). Or similar assets in each survey.
+hwb_tmp <- asm_hh$DurableGoods %>%
+  dplyr::select(IDNO,DurableGoodID,l_1) %>%
+  filter(DurableGoodID %in% # keep rows applying relevant goods
+           unique(DurableGoodID)[c(19,17,18,12,11)]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(DurableGoodID,l_1) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(ls_ast=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(ls_ast=sum(ls_ast,na.rm=T)) %>% # summarise for HH
+  mutate(ls_ast=ifelse(ls_ast>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## LIVELIHOODS
+# lv_pas
+# The household does not own at least one of the following: > 1ha agricultural land; fishing vessel; livestock
+
+res <- hwb_tmp[1]
+
+tmp <- asm_hh$HHAgriPlotsRoster %>%
+    mutate(IDNO,sett_pjid=Village) %>%
+    dplyr::select(IDNO,sett_pjid,sz_init=AGa_2_a,un_init=AGa_2_b,ten=AGa_11) %>%
+    # fix one variable
+    mutate(un_init = replace(un_init, IDNO=="1_5a4138  ","Sq. meters")) %>%
+    mutate(un = as.numeric(as.character( # convert to Ha
+      factor(un_init,labels=c(2.4,1,1,1/10000))
+    ))) %>%
+    mutate(sz = sz_init * un) %>%
+  filter(!(ten %in% c("Moved in without permission", "Short term rent",
+                    "Borrowed for free)", "Leasehold", "Farming as tenant"))) %>%
+  filter(sz < 1) %>%
+  unique() %>%
+  mutate(AGa_0 = 1) %>% # recode
+  dplyr::select(IDNO,AGa_0) %>%
+  right_join(res,by="IDNO") %>%
+  mutate(AGa_0 = replace(AGa_0, which(is.na(AGa_0)),0))
+tmp <- asm_hh$Livestock %>% # land
+  dplyr::select(IDNO,GanadoID, AGe_2) %>% # livestock
+  filter(GanadoID %in% c("Bull / Ox", "Cow", "Calf","Sheep","Donkey",
+                         "Chicken Broiler", "Pigs", "Goats")) %>%
+  filter(AGe_2 == "Yes") %>%
+  dplyr::select(-GanadoID, -AGe_2) %>%
+  unique() %>%
+  mutate(AGe_1 = 1) %>% # recode
+  right_join(res,by="IDNO") %>%
+  mutate(AGe_1 = replace(AGe_1, which(is.na(AGe_1)),0)) %>% # recode
+  right_join(tmp,by="IDNO")
+tmp <- asm_hh$DurableGoods %>% 
+  dplyr::select(IDNO,DurableGoodID,l_1) %>%
+  filter(DurableGoodID %in% # keep rows applying relevant goods
+           unique(DurableGoodID)[c(8:10)]) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(DurableGoodID,l_1) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(bt=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(bt=sum(bt,na.rm=T)) %>% # summarise for HH
+  mutate(bt=ifelse(bt>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  right_join(tmp,by="IDNO")  # add to other cols
+tmp$lv_pas <- ifelse(rowSums(tmp[-1],na.rm=T)>0,1,0) # using base R because dplyr not working for some reason
+
+hwb_tmp <- tmp %>% # bind
+  dplyr::select(IDNO,lv_pas) %>%
+  full_join(hwb_tmp,.)
+
+## RISK
+# rk_exp
+# Experienced two shocks in the last year
+hwb_tmp <- asm_hh$Shocks %>%
+  dplyr::select(IDNO,ShockID, r_20_a) %>%
+  mutate(id=seq(1,nrow(.))) %>%
+  spread(ShockID, r_20_a) %>%
+  dplyr::select(-id) %>%
+  { . ->> vrs } %>% # keep vars
+  mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+  mutate(rk_exp=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>% # get row sums
+  group_by(IDNO) %>%
+  summarise(rk_exp=sum(rk_exp,na.rm=T)) %>% # summarise for HH
+  mutate(rk_exp=ifelse(rk_exp>1,1,0)) %>% # recode
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## SUBJECTIVE WELLBEING
+# swb
+hwb_tmp <- asm_hh$HHWellBeing %>%
+  dplyr::select(IDNO,swb=r_12) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(swb= as.character(swb)) %>% # make character
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+ # codes
+lvls(vrs)
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+hwb_tmp <- plyr::rbind.fill(asm_hh$Inputs[c("IDNO","AGb_14_b")],      
+           asm_hh$Seeds[c("IDNO","AGc_15_b")],
+           asm_hh$Livestock[c("IDNO","AGe_12")]) %>%
+    mutate_all(funs(ifelse(is.na(.), 0, .))) %>% # NAs mean zero here
+    mutate_at(.vars=vars(-IDNO), # make underlying vars numeric zero based
+            .funs=list(~ as.numeric(factor(.))-1)) %>% # recode
+    mutate(rwb_cm_st=rowSums(dplyr::select(.,-c(IDNO)),na.rm=T)) %>%  # get row sums
+    group_by(IDNO) %>%
+    summarise(rwb_cm_st=sum(rwb_cm_st,na.rm=T)) %>% # summarise for HH
+    mutate(rwb_cm_st=ifelse(rwb_cm_st>0,1,0)) %>% # recode
+    group_by(IDNO) %>% 
+    filter(row_number()==1) %>%  
+    full_join(hwb_tmp,.)
+
+
+# Community agency
+# rwb_cm_ag
+# Disatissfied (or below) with friendships or community support
+hwb_tmp <- asm_hh$HHWellBeing %>%
+  dplyr::select(IDNO,rwb_cm_ag=r_9) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_cm_ag = ifelse(as.numeric(factor(rwb_cm_ag)) %in% c(2,5),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp <- asm_hh$HHWellBeing %>%
+  dplyr::select(IDNO,rwb_fm_ag=r_2) %>%
+  { . ->> vrs } %>% # keep vars
+  drop_na() %>%
+  mutate(rwb_fm_ag = ifelse(as.numeric(factor(rwb_fm_ag)) %in% c(2,5),0,1)) %>%
+  group_by(IDNO) %>% 
+  filter(row_number()==1) %>%
+  full_join(hwb_tmp,.)
+# codes
+lvls(vrs)
+
+## c) Check variables and tidy  ###################################
+
+# make values annual as needed
+hwb_tmp <- hwb_tmp %>%
+  group_by(hhid) %>%
+  summarise(
+    pj_hhid = as.character(getmode(IDNO)),
+    pjnm = as.character(getmode(pjnm)),
+    cn = as.character(getmode(cn)),
+    yr = getmode(yr),
+    admn1 = as.character(getmode(admn1)),
+    admn2 = as.character(getmode(admn2)),
+    admn3 = as.character(getmode(admn3)),
+    admn4 = as.character(getmode(admn4)),
+    admn1n = as.character(getmode(admn1)), # admin division number codes
+    admn2n = as.character(getmode(admn2)), 
+    admn3n = as.character(getmode(admn3)), 
+    admn4n = as.character(getmode(admn4)), 
+    ses = as.character(getmode(ses)),
+    gnd = as.character(getmode(gnd)),
+    rsp_age = getmode(rsp_age),
+    edu_yrs = trunc(median(edu_yrs,na.rm=T)), 
+    edu_chld_att = trunc(median(edu_chld_att,na.rm=T)),
+    hlt_chld_mt = trunc(median(hlt_chld_mt,na.rm=T)),
+    hlt_fd_sec = trunc(median(hlt_fd_sec, na.rm=T)),
+    hlt_pt = trunc(median(hlt_pt, na.rm=T)),
+    ls_elec = trunc(median(ls_san, na.rm=T)),
+    ls_san = trunc(median(ls_san, na.rm=T)),
+    ls_wat = trunc(median(ls_wat, na.rm=T)),
+    ls_hse = trunc(median(ls_hse, na.rm=T)),
+    ls_fuel = trunc(median(ls_fuel, na.rm=T)),
+    ls_ast = trunc(median(ls_ast, na.rm=T)),
+    lv_pas = trunc(median(lv_pas, na.rm=T)),
+    rk_exp = trunc(median(lv_pas, na.rm=T)),
+    swb = as.character(getmode(swb)),
+    rwb_cm_st = trunc(median(rwb_cm_st, na.rm=T)),
+    rwb_cm_ag = trunc(median(rwb_cm_ag, na.rm=T)),
+    rwb_fm_st = trunc(median(rwb_fm_st, na.rm=T)),
+    rwb_fm_ag = trunc(median(rwb_fm_ag, na.rm=T))
+  )
+hwb_tmp$hhid <- NULL
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+  # sort pj_hhid
+  hwb_tmp$pj_hhid <- gsub(".*_","",hwb_tmp$pj_hhid)
+
+
+# remove wave from hhid
+# hwb_tmp$pj_hhid <- substring(hwb_tmp$pj_hhid,3)
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(asm_hh,hwb_tmp,wv1,wv2,vrs,tmp)
+
+```
+
+**13. MIYUN**
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get data #####################
+require(haven)
+miyun <- read_dta("C:/n4sdgs/r_analysis/data/raw/miyun/Miyun_Nat4SDGs.dta")
+miyun <- miyun %>% mutate_if(is.factor,as.character)
+miyun[miyun==-99] <- NA
+
+miyun2 <- read_dta("C:/n4sdgs/r_analysis/data/raw/miyun/Miyun2015_ind.dta")
+miyun2 <- miyun2 %>% mutate_if(is.factor,as.character)
+miyun2[miyun2==-99] <- NA
+
+miyun3 <- read_dta("C:/n4sdgs/r_analysis/data/raw/miyun/Miyun2015_hhwsums.dta")
+miyun3 <- miyun3 %>% mutate_if(is.factor,as.character)
+miyun3[miyun3==-99] <- NA
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  IDNO = as.character(miyun$hh_id), # wave number + hogar
+  hh_id = as.character(miyun$hh_id),
+  pjnm = "mi",
+  cn = rep("mi",nrow(miyun)),
+  yr = 2014,
+  admn1 = as.character(NA), # to add name from spatial data
+  admn2 = as.character(NA), # to add name from spatial data
+  admn3 = as.character(NA),
+  admn4 = as.character(NA),
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = miyun$vill_id, 
+  ses = as.character(NA) # to add name from spatial data
+)
+
+hwb_tmp$gnd <- miyun$head_gend
+hwb_tmp$rsp_age <- miyun$head_age
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("male","female"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- miyun %>%
+  mutate(edu_yrs = ifelse(ed_max>=6,1,0)) %>% # ifelse recode
+  dplyr::select(hh_id,edu_yrs) %>%
+  full_join(hwb_tmp,.)
+
+# edu_chld_att
+# Any school-aged child is not attending school for at least six years
+hwb_tmp <- miyun %>%
+  mutate(edu_chld_att = ifelse(kidsinschool==0,0,1)) %>%
+  mutate(edu_chld_att = ifelse(numkids==0,1,edu_chld_att)) %>%
+  dplyr::select(hh_id, edu_chld_att) %>%
+  full_join(hwb_tmp,.)
+
+## HEALTH
+
+# hlt_chld_mt
+#  chronic illness in family
+hwb_tmp <- miyun3 %>%
+  mutate(hlt_chld_mt = ifelse(hh_health==2,0,1)) %>%
+  dplyr::select(hh_id, hlt_chld_mt) %>%
+  full_join(hwb_tmp,.)
+
+# hlt_fd_sec
+# HH in lowest quantile of food consumption
+hwb_tmp <- miyun3 %>%
+  select(hh_id,exp_food,hhsize) %>%
+  drop_na() %>%
+  mutate(hlt_fd_sec = exp_food/sqrt(hhsize)) %>%
+  mutate(hlt_fd_sec = as.numeric(cut(hlt_fd_sec,breaks=quantile(hlt_fd_sec)))) %>%
+  mutate(hlt_fd_sec = ifelse(hlt_fd_sec==1,0,1)) %>%
+  full_join(hwb_tmp,.)
+
+# hlt_pt
+# no data
+hwb_tmp$hlt_pt <- NA
+
+## LIVING STANDARDS
+
+# ls_elec
+# no data
+hwb_tmp$ls_elec <- NA
+
+# ls_san
+hwb_tmp <- miyun3 %>%
+  select(hh_id,ls_san=sanitation) %>%
+  drop_na() %>%
+  mutate(ls_san = ifelse(ls_san==4,0,1)) %>%
+  full_join(hwb_tmp,.)
+
+# ls_wat
+hwb_tmp <- miyun3 %>%
+  select(hh_id,ls_wat=drinkwater) %>%
+  drop_na() %>%
+  mutate(ls_wat = ifelse(ls_wat%in%c(4,5),0,1)) %>%
+  full_join(hwb_tmp,.)
+
+# ls_hse
+# no data
+### UP TO HERE - COULD MAKE LOWER QUANTILE OF HOUSE AREA?
+hwb_tmp$ls_hse <- NA
+
+# ls_fuel
+# no data
+hwb_tmp$ls_fuel <- NA
+
+# ls_ast
+# data in survey form but not in data we have
+hwb_tmp$ls_ast <- NA
+
+## LIVELIHOODS
+# data in survey form but not in data we have
+hwb_tmp <- miyun3 %>%
+  dplyr::select(hh_id,agland_tot,natforest_tot,econforest_tot) %>%
+  mutate(lv_pas=rowSums(.[-1],na.rm=T)) %>%
+  mutate(lv_pas=ifelse(lv_pas>0,1,0)) %>%
+  dplyr::select(hh_id,lv_pas) %>%
+  full_join(hwb_tmp,.)
+
+## RISK
+# rk_exp
+# household reported borrowing from loan shark
+hwb_tmp <- miyun3 %>%
+  select(hh_id,rk_exp=loanshark) %>%
+  mutate(rk_exp=ifelse(rk_exp<2,0,1)) %>%
+  mutate(rk_exp=replace(rk_exp,is.na(rk_exp),1)) %>%
+  full_join(hwb_tmp,.)
+
+## SUBJECTIVE WELLBEING
+# no data
+hwb_tmp$swb <- NA
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+# data in survey form but not in data we have
+hwb_tmp <- miyun3 %>%
+  select(hh_id,cadre_familymemb,cadre_relative) %>%
+  mutate(rwb_cm_st = ifelse(
+    rowSums(dplyr::select(.,cadre_familymemb,cadre_relative),na.rm=T)>0,1,0)) %>%
+  full_join(hwb_tmp,.)
+
+# Community agency
+# rwb_cm_ag
+# data in survey form but not in data we have
+hwb_tmp$rwb_cm_ag <- NA
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp$rwb_fm_ag <- as.numeric(NA) # no data
+
+## c) Check variables and tidy  ###################################
+
+hwb_tmp$hhid <- NULL
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+names(hwb_tmp)[names(hwb_tmp)=="hh_id"] <- "pj_hhid"
+hwb_tmp$IDNO <- NULL
+
+# align col order with main df
+hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_tmp$admn4n <- as.character(hwb_tmp$admn4n)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(miyun,hwb_tmp)
+
+```
+
+**14. ORISSA**
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get data #####################
+require(foreign)
+#### a) get all data in list object  #####################
+
+nm1 <- list.files("../data/raw/orissa_unpublished",
+                  pattern="*.dta",full.names=T)
+od_hh <- list()
+for (i in 1:length(nm1)){
+  tp <- read.dta(nm1[i])
+  od_hh[[i]] <- tp
+  names(od_hh)[i] <- strsplit(nm1[i],"/")[[1]][5]
+  names(od_hh)[i] <- stringr::str_sub(names(od_hh)[i],1,-5)
+  # convert NAs
+  # asp_hh[[i]][asp_hh[[i]]==""] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-999"] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-998"] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-997"] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-888"] <- NA
+  # asp_hh[[i]]$hhid <- paste(asp_hh[[i]]$Pueblo, # add hhid
+  #                           asp_hh[[i]]$Hogar, sep="_")
+}
+
+od_hh$C.Land_Odisha$Site_code <- # align site ID data types 
+  factor(od_hh$C.Land_Odisha$Site_code, 
+         labels=levels(od_hh$A.hh_roaster_Odisha$Site_code))
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+
+hwb_tmp <- data.frame(stringsAsFactors = F,
+  Vil_HH_Code = od_hh$A.hh_roaster_Odisha$Vil_HH_Code,
+  pj_hhid = as.character(od_hh$A.hh_roaster_Odisha$Vil_HH_Code),
+  pjnm = "od",
+  cn = "IND",
+  yr = 2014,
+  admn1 = as.character(NA), # to add name from spatial data
+  admn2 = as.character(NA), # to add name from spatial data
+  admn3 = as.character(NA),
+  admn4 = as.character(od_hh$A.hh_roaster_Odisha$Site_code),
+  admn1n = NA, # admin division number codes
+  admn2n = NA, 
+  admn3n = NA, 
+  admn4n = NA, 
+  ses = as.character(NA) # to add name from spatial data
+)
+
+hwb_tmp$gnd <- od_hh$A.hh_roaster_Odisha$Sex
+hwb_tmp$rsp_age <- od_hh$A.hh_roaster_Odisha$Age
+hwb_tmp$gnd <- as.character(factor(hwb_tmp$gnd,labels=c("male","female"))) # add names to gender
+
+## EDUCATION 
+
+# edu_yrs
+# No household member aged 10 years or older has completed six years of schooling
+hwb_tmp <- od_hh$A.hh_roaster_Odisha %>%
+  mutate(edu_yrs = ifelse(Edu>=2,1,0)) %>% # ifelse recode
+  dplyr::select(edu_yrs) %>%
+  bind_cols(hwb_tmp,.)
+
+# edu_chld_att
+# data in survey form but not in data we have
+hwb_tmp$edu_chld_att <- NA
+
+## HEALTH
+
+# hlt_chld_mt
+#  no data
+hwb_tmp$hlt_chld_mt <- NA
+
+# hlt_fd_sec
+# no data
+hwb_tmp$hlt_fd_sec <- NA
+
+
+# hlt_pt
+# no data
+hwb_tmp$hlt_pt <- NA
+
+## LIVING STANDARDS
+
+# ls_elec
+# no data
+hwb_tmp$ls_elec <- NA
+
+# ls_san
+# data in survey form but not in data we have
+hwb_tmp$ls_san <- NA
+
+# ls_wat
+# data in survey form but not in data we have
+hwb_tmp$ls_wat <- NA
+
+# ls_hse
+# Katcha is rudimentary
+hwb_tmp <- od_hh$B.Asset_Odisha %>%
+  dplyr::select(Assets3) %>%
+  mutate(ls_hse = ifelse(Assets3=="katcha" ,0,1)) %>%
+  dplyr::select(ls_hse) %>%
+  bind_cols(hwb_tmp,.)
+
+# ls_fuel
+# no data
+hwb_tmp$ls_fuel <- NA
+
+# ls_ast
+# Has TV, motorbike
+hwb_tmp <- od_hh$B.Asset_Odisha %>%
+  dplyr::select(Assets1, Asset4) %>%
+  mutate_all(~as.numeric(.)-1) %>%
+  mutate(ls_ast = ifelse(rowSums(dplyr::select(.,Assets1,Asset4),na.rm=T)>0,1,0)) %>%
+  dplyr::select(ls_ast) %>%
+  bind_cols(hwb_tmp,.)
+  
+## LIVELIHOODS
+# lv_pas
+# owns land
+hwb_tmp <- od_hh$C.Land_Odisha %>%
+  dplyr::select(starts_with("OL")) %>% 
+mutate(lv_pas = ifelse(rowSums(dplyr::select(.,starts_with("OL")),na.rm=T)>0,1,0)) %>%
+  dplyr::select(lv_pas) %>%
+  bind_cols(hwb_tmp,.)
+
+## RISK
+# rk_exp
+# no data
+hwb_tmp$rk_exp <- NA
+
+## SUBJECTIVE WELLBEING
+# no data
+hwb_tmp$swb <- NA
+
+## RELATIONAL WELLBEING
+
+# Community Opportunity Structures
+# Household is not a member of, or has not received assistance from, one of the organisations or groups asked about in the survey
+# rwb_cm_st
+# data in survey form but not in data we have
+hwb_tmp$rwb_cm_st <- NA
+
+
+# Community agency
+# rwb_cm_ag
+# data in survey form but not in data we have
+hwb_tmp$rwb_cm_ag <- NA
+
+# Family opportunity structures
+# rwb_fm_st
+# No data
+hwb_tmp$rwb_fm_st <- as.numeric(NA) # no data
+
+# Family agency
+# rwb_fm_ag
+# No data
+hwb_tmp$rwb_fm_ag <- as.numeric(NA) # no data
+
+## c) Check variables and tidy  ###################################
+
+hwb_tmp$Vil_HH_Code <- NULL
+
+# check vars
+summary(hwb_tmp)
+hist_grid(hwb_tmp)
+
+
+# align col order with main df
+#hwb_tmp <- hwb_tmp[names(hwb_all)] 
+
+# check col classes before merge
+sapply(hwb_tmp,class)
+
+
+# bind to main dataframe
+hwb_tmp$swb <- as.character(hwb_tmp$swb)
+hwb_tmp$admn4n <- as.character(hwb_tmp$admn4n)
+hwb_all <- bind_rows(hwb_all,hwb_tmp)
+
+# clear workspace
+rm(miyun,hwb_tmp)
+
+
+```
+
+**Add IDs and spatial info**
+```{r add, message = FALSE, warning = FALSE, include = TRUE}
+#asp, asm, or, mi
+
+### deal with NA
+hwb_all <- hwb_all[which(!is.na(hwb_all$pjnm)),]
+
+#### add N4S HH
+hwb_all$hhid <- seq(1,nrow(hwb_all)) # N4S hh id
+
+
+```
+
+```{r final stuff, message = FALSE, warning = FALSE, include = TRUE}
+
+## add provisioing means variables
+pm_dat <- read.csv("../data/proc/prov_means_all.csv")
+pm_dat$X <- NULL
+
+hwb_all <- hwb_all %>%
+  left_join(pm_dat,by=c("pjnm","pj_hhid","admn4","admn4n"))
+
+### save data
+# sort names
+
+# hwb_all
+write.csv(hwb_all,"../data/proc/hwb_all.csv")
+
+
+
+```

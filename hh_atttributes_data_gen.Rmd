@@ -1,0 +1,1541 @@
+---
+title: "Household attributes data gen"
+output:
+  html_document: default
+  word_document:
+  pdf_document: default
+---
+**Background**
+
+This script generates for all available N4S datasets infomration on household 
+attributes needed for some of the analyses and not generated elsewhere
+
+I first set up a dataframe with all of the potential variables, then add the 
+variables for each dataset. Each dataset has different formats so I load and
+generate variables seperately for each project.
+
+**1. R Setup**
+```{r setup,  message = FALSE, warning = FALSE}
+
+#### a) check packages and install if needed ###################################
+check.packages <- function(pkg){
+      new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+      if (length(new.pkg))
+          install.packages(new.pkg, dependencies = TRUE,repos = "http://cran.us.r-project.org")
+  }
+check.packages(c("ggplot2","knitr","xlsx","Hmisc","BBmisc","dplyr","grid",
+                 "reshape2","tidyr","car","openxlsx"))
+
+#### b) R markdown and knitr stuff ###################################
+knitr::opts_chunk$set(echo = TRUE) ; knitr::opts_chunk$set(root.dir = getwd())
+
+# require
+require(readr)
+require(dplyr)
+require(tidyr)
+```
+
+**2. Load functions**
+```{r functions, message = FALSE, warning = FALSE}
+
+#### a) get general functions ###################################
+source('functions.R')
+
+# function to view variables as levels
+lvls <- function(dt){apply(dt[-1],2,function(x)levels(factor(x)))}
+
+
+
+```
+
+**3. Set up main dataframe**
+```{r dataframe, message = FALSE, warning = FALSE}
+
+#### a) set up dataframe to which to append variables from each dataset #######
+
+att_all <- data.frame(stringsAsFactors = F,
+  
+  ## ID VARIABLES
+  pjnm = as.character(), # project name
+  cn = character(), # country
+  pj_hhid = character(), # id for household used in project
+  
+  ## ATTRIBUTES
+
+  # labour profile
+  hh_size = as.numeric(), # household size
+  ppl_u15 = as.numeric(), # people under 15
+  ppl_o64 = as.numeric(), # people over 64
+  dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  
+  # social grouping
+  gen_hd = as.character(), # gender of hh head
+  ethn_hd = as.character(), # ethnicity hh head
+  relig_hd = as.character(), # religion hh head
+  tm_vl_hd = as.numeric(), # time in village hh head
+  brn_vl_hd = as.character(), # born in village hh head
+  elt_occup = as.character(), # elite occupation in household
+  
+  # tenure
+  tn_own = as.numeric(), # amount of land owned
+  tn_rnt = as.numeric(), # amount of land rented
+  tn_brw = as.numeric(), # amount of land borrowed
+  tn_inf = as.numeric(), # amount of 'private' but informally access land
+  tn_lsd = as.numeric() # amount of land leased out
+  
+  # access to support
+  # in_aid = as.character(), # access to aid or government assistance
+  # in_crd = as.character() # access to credit
+)
+
+# keep df col order
+dford <- names(att_all)
+
+```
+
+**4. SPACES**
+```{r spaces, message = FALSE, warning = FALSE}
+
+#### a) get data from SQL database and add to spaces list  #####################
+spaces <- list() # empty list
+# load data and add raw data tables to spaces list
+sp_db <- RSQLite::dbConnect(RSQLite::SQLite(), dbname="../data/raw/spaces_initial/hhsurvey_database.sqlite")
+tbl <- RSQLite::dbListTables(sp_db) # list tables
+tbl <- tbl[!grepl("sqlite_",tbl)] # remove unneeded sql files
+for (i in seq(along=tbl)) { # loop to extract tables and add to list
+  spaces[[i]] <- RSQLite::dbGetQuery(conn=sp_db, 
+                                     statement=paste("SELECT * FROM '", tbl[[i]], "'", sep=""))
+  spaces[[i]][spaces[[i]]==-9] <- NA # convert NAs
+  names(spaces)[i] <- tbl[i]
+}
+# get survye ids linked to hh heads
+RSQLite::dbDisconnect(sp_db) # disconnect db
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+att_tmp <- data.frame(stringsAsFactors = F,
+  pj_hhid = as.character(spaces$cover$hhid),
+  survid = spaces$cover$survid, # add survid for joining, remove later
+  pjnm = rep("sp",nrow(spaces$cover)),
+  cn = spaces$cover$country
+)
+att_tmp$cn[which(att_tmp$cn=="kenya")] <- "KEN" # align country names
+att_tmp$cn[which(att_tmp$cn=="mz")] <- "MOZ"
+
+### labour profile
+
+  # hh_size, ppl_u15, ppl_o64
+att_tmp <- spaces$t05census %>%
+  dplyr::select(survid,age) %>%
+  mutate(age = replace(age, # assuming NAs are young dependents
+                                 which(is.na(age)), 
+                           median(age[age<15],na.rm=T))) %>%
+  { . ->> vrs } %>% # keep vars
+  group_by(survid) %>%
+  summarise(hh_size = length(age),
+            ppl_u15 = length(age[age<15]),
+            ppl_o64 = length(age[age>64])) %>%
+  full_join(att_tmp,.)
+  lvls(vrs) # codes
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+  # gen_hd, ethn, relig, tm_vill, brn_vill
+  att_tmp <- spaces$t05census %>%
+    mutate(gender = replace(gender, # assuming NAs are male
+                                   which(is.na(gender)),1)) %>%
+    filter(relat=="head") %>%
+    mutate(gen_hd = as.character( # gen_hd
+      factor(gender,labels=c("female","male")))) %>%
+    mutate(ethn_hd = ethnic) %>%
+    mutate(relig_hd = religion) %>%
+    mutate(tm_vl_hd = village) %>%
+    mutate(brn_vl_hd = ifelse(tm_vl_hd - age < 0, "no", "yes")) %>%
+    select(survid,gen_hd:brn_vl_hd) %>%
+    full_join(att_tmp,.)
+
+  #   elt_occup = as.numeric(), # elite occupation in household
+  att_tmp <- spaces$t05census %>%
+    select(survid,occup) %>%
+    { . ->> vrs } %>% # keep vars
+    mutate(elt_occup = as.numeric(as.factor(occup))) %>%
+    group_by(survid) %>%
+    mutate(elt_occup = ifelse(elt_occup %in% c(1,2,5:7,18,22,23,53,59,60,96,98, # elt_occup
+                                                99,145,157,160,163,180,184,185,
+                                                193,194,201,202,206,209,214,
+                                                251,256,257,258,259,262,360,361),
+                               1,0)) %>%
+    group_by(survid) %>%
+    summarise(elt_occup = max(elt_occup,na.rm=T)) %>%
+    mutate(elt_occup = as.character(factor(elt_occup, levels=c("no","yes")))) %>%
+    select(survid,elt_occup) %>%
+    full_join(att_tmp,.)
+    lvls(vrs) # codes
+   
+  ### tenure
+  
+  # tn_own
+  tmp <- spaces$t11asset %>%
+  dplyr::select(survid,q11519)
+  #write.csv(levels(factor(tmp$q11519)),"sp_land_clean.csv")
+  tmp2 <- read.csv("../data/proc/initial/sp_land_clean.csv")
+  tmp$q11519_new <- factor(tmp$q11519,labels=tmp2$q11519_new) # update with cleaned values
+  att_tmp <- tmp %>%
+    mutate(tn_own = as.numeric(as.character(q11519_new))) %>%
+  dplyr::select(survid,tn_own) %>%
+  full_join(att_tmp,.)
+  
+  # all other land tenure - no data
+  att_tmp$tn_rnt <- NA # amount of land rented
+  att_tmp$tn_brw <- NA # amount of land borrowed
+  att_tmp$tn_inf <- NA # amount of 'private' but informally access land
+  att_tmp$tn_lsd <- NA # amount of land leased out
+    
+  ### access to support
+
+  #   in_aid
+  # att_tmp$in_aid <- NA # no specific data on this variable. maybe buried in non-cash income section?
+  # 
+  # #   in_crd
+  # spaces$t03need_mz$q354 <- as.integer(spaces$t03need_mz$q354)
+  # spaces$t03need_mz$q356 <- as.integer(spaces$t03need_mz$q356)
+  # spaces$t03need_ke$q383 <- as.integer(spaces$t03need_ke$q383)
+  # 
+  # att_tmp <- bind_rows(spaces$t03need_ke,spaces$t03need_mz) %>%
+  # mutate(in_crd = as.character(factor(q311,levels=c("no","yes")))) %>%
+  # select(survid,in_crd) %>%
+  # full_join(att_tmp,.)
+  
+  ### final stuff
+  # SPACES did several interviews per household
+  # just keeping most complete response for now, then taking first row for ties, assuming it was hh head
+  att_tmp <- att_tmp %>%
+    mutate(value = rowSums(is.na(.))) %>%
+    group_by(pj_hhid)  %>%
+    filter(value == min(value)) %>% # get most complete response
+    filter(row_number()==1) %>% # then first row in group
+    dplyr::select(-c("value"))
+  
+  ## bind sett_pjid
+  att_tmp <- spaces$cover %>%
+    select(survid,sett_pjid=site) %>%
+    right_join(att_tmp,by="survid") %>%
+    mutate(sett_pjid = as.character(factor(sett_pjid,
+                                           labels =c("Kongowea",
+                                                     "Lalane",
+                                                     "Maringanha",
+                                                     "Mieze",
+                                                     "Mkwiro",
+                                                     "Tzunza",
+                                                     "vamizi",
+                                                     "Vanga"))))
+  
+  # ## bind to main df
+  # att_all <- bind_rows(att_all,att_tmp)
+  
+  att_tmp$pjnm <- "sp"
+  sp_att <- att_tmp
+  
+  write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_spaces.csv")
+
+
+
+```
+
+**5. DELTAS **
+```{r deltas, message = FALSE, warning = FALSE}
+
+#### a) get data from csvs for each round  #####################
+# add id for each round and bind to one dataframe
+
+## household survey round 1
+# - Falgun to Jaishthoo. Spring and Summer. mid Feb to mid June
+de_hh_r1_raw <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                     "../data/raw/sango/DELTAS/1-Spatial/07-ESPA_Deltas_1st_Round.csv")
+de_hh_r1_raw$rnd <- paste(de_hh_r1_raw$IDNO,"r1",sep="")
+
+## household survey round 2
+# - Ashar to Ashwin. Monsoon and Autumn. Mid-June to Mid October.
+de_hh_r2_raw <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                     "../data/raw/sango/DELTAS/1-Spatial/08-ESPA_Deltas_2nd_Round.csv")
+de_hh_r2_raw$rnd <- paste(de_hh_r2_raw$IDNO,"r2",sep="")
+
+## household survey round 3
+# - Kartik to Magh. Dry season Winter. Mid-October to Mid February
+de_hh_r3_raw <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                     "../data/raw/sango/DELTAS/1-Spatial/09-ESPA_Deltas_3rd_Round.csv")
+de_hh_r3_raw$rnd <- paste(de_hh_r3_raw$IDNO,"r3",sep="")
+
+## make big dataframe
+de_hh <- rbind(de_hh_r1_raw,de_hh_r2_raw,de_hh_r3_raw)
+
+## add sett_pjid and pj_hhid
+de_hh$sett_pjid <- paste(de_hh$CLUSTER,de_hh$ZONE,de_hh$DIVISION,de_hh$DISTRICT,
+                         de_hh$UPAZILA, de_hh$UNION, de_hh$MOUZA, sep="")
+de_hh$pj_hhid <- de_hh$IDNO
+
+## deal with NAs
+de_hh[de_hh==96] <- NA
+
+## clean workspace
+rm(de_hh_r1_raw,de_hh_r2_raw,de_hh_r3_raw)
+
+## keep segment info for merge at end
+de_seg <- unique(de_hh[c("IDNO","UNION","MOUZA","SEGMENT")])
+
+summary(de_hh$Q207H)
+summary(de_hh$Q207M)
+## b) generate data in temporary dataframe  ###################################
+
+### just keep first round for simplicity for now. HH attributes should be the same in all rounds?
+de_hh <- de_hh %>%
+  filter(grepl("r1",rnd))
+
+## ID VARIABLES AND DEMOGRAPHICS
+att_tmp <- data.frame(stringsAsFactors = F,
+  pj_hhid = de_hh$pj_hhid,
+  sett_pjid = de_hh$sett_pjid,
+  pjnm = rep("de",nrow(de_hh)),
+  cn = "BGD"
+)
+
+### labour profile
+
+  # hh_size, ppl_u15, ppl_o64
+att_tmp <- de_hh %>%
+  dplyr::select(sett_pjid,pj_hhid,starts_with("Q105_")) %>%
+  #group_by(sett_pjid,pj_hhid) %>%
+  mutate(hh_size = rowSums(!is.na(.[-1:-2]),na.rm=T),
+         ppl_u15 = rowSums(.[-1:-2]<15,na.rm=T),
+          ppl_o64 = rowSums(.[-1:-2]>64,na.rm=T)) %>%
+  select(sett_pjid,pj_hhid,hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+  # gen_hd,  relig,  brn_vill
+  # no tm_vill,ethn,
+att_tmp <- de_hh %>%
+  dplyr::select(sett_pjid,pj_hhid,
+                gen_hd=Q104_01,
+                brn_vill=Q112A_01,
+                relig_hd=Q215) %>%
+  mutate(gen_hd = factor(gen_hd,labels=c("male","female"))) %>%
+  mutate(ethn_hd = NA) %>%
+  mutate(relig_hd = factor(relig_hd,labels=c("Islam","Hindu","Christian"))) %>%
+  mutate(tm_vl_hd = NA) %>%
+  mutate(brn_vl_hd = as.factor(ifelse(brn_vill>2,"no","yes"))) %>%
+  
+    full_join(att_tmp,.)
+
+  #   elt_occup  # elite occupation in household
+  att_tmp <- de_hh %>%
+  dplyr::select(sett_pjid,pj_hhid,starts_with("Q302_")) %>%
+  { . ->> vrs } %>% # keep vars
+    group_by(sett_pjid,pj_hhid) %>%
+    mutate(elt_occup = ifelse(Q302_1 %in% c(41:43,73,77:86),"yes","no")) %>%
+    ungroup() %>%
+    mutate(elt_occup = as.factor(elt_occup)) %>%
+    select(sett_pjid,pj_hhid,elt_occup) %>%
+    full_join(att_tmp,.)
+  
+   
+  ### tenure
+  att_tmp <- de_hh %>%
+  dplyr::select(sett_pjid,pj_hhid,starts_with("Q9D")) %>%
+    mutate(tn_own = rowSums(dplyr::select(.,Q9D01:Q9D04,Q9D16),na.rm=T)) %>% # inc khas land
+    mutate(tn_rnt = rowSums(dplyr::select(.,Q9D06:Q9D09),na.rm=T)) %>%
+    mutate(tn_brw = NA) %>% # no data
+    mutate(tn_inf = NA) %>% # no data
+    mutate(tn_lsd = rowSums(dplyr::select(.,Q9D11:Q9D14),na.rm=T)) %>%
+    select(sett_pjid,pj_hhid,tn_own:tn_lsd) %>%
+    full_join(att_tmp,.)
+    
+  # tn_com. assuming all households have access to common fisheries
+  #att_tmp$tn_com <- "yes"
+    
+  ### access to support
+# 
+#   #   in_aid
+#   att_tmp$inst_aid <- NA # no specific data on this variable. maybe buried in non-cash income section?
+#   
+#   #   in_crd
+#   att_tmp$inst_crd <- NA # no data
+  
+  # env quality
+  # att_tmp <- de_hh %>%
+  #   select(sett_pjid,pj_hhid,
+  #          qual_ag=Q1201_2,
+  #          qual_fsh_riv=Q1201_11,
+  #          qual_fsh_mar=Q1201_12,
+  #          qual_for_mng=Q1201_13) %>%
+  #   mutate_at(vars(qual_ag:qual_for_mng), # make 8 NAs
+  #             funs(replace(.,.==8,NA)))%>%
+  #   full_join(att_tmp,.)
+  
+  att_tmp$pjnm <- "de"
+  de_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_deltas.csv")
+  
+
+```
+
+**6. PAGES **
+```{r pages, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+nm <- c(list.files("../data/raw/sango/P4GES/1-P4GES_HHS_CE/data",full.names=T),
+        list.files("../data/raw/sango/P4GES/2-P4GES_AGR_WHP/data",full.names=T))
+pa_hh <- list()
+for (i in 1:length(nm)){
+  pa_hh[[i]] <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm[i])
+  names(pa_hh)[i] <- strsplit(nm[i],"/")[[1]][8]
+  names(pa_hh)[i] <- substr(names(pa_hh)[i],1,nchar(names(pa_hh)[i])-15)
+  pa_hh[[i]][pa_hh[[i]]==-98] <- NA # convert NAs
+}
+
+# y <- pa_hh$WHP_S02_PRODSHARV %>%
+#   select(starts_with("dist_"))
+# table(y$dist_vil2site_ut_spr)
+# table(y$dist_vil2site_ut_rn)
+#   summary()
+
+## b) generate data in temporary dataframe  ###################################
+#att_tmp <- NULL
+
+### labour profile
+
+  # hh_size, ppl_u15, ppl_o64
+att_tmp <- pa_hh$HHS_S03_HROST2 %>%
+  #dplyr::select(pj_hhid=resp_id,sett_pjid=fokontany,starts_with("Q105_")) %>%
+  mutate(pj_hhid=resp_id,sett_pjid=fokontany) %>%
+  group_by(sett_pjid,pj_hhid) %>%
+  summarise(
+         hh_size = length(age[!is.na(age)]),
+         ppl_u15 = length(age[!is.na(age) & age<15]),
+          ppl_o64 = length(age[!is.na(age) & age>64])) %>%
+  ungroup() %>%
+  select(sett_pjid,pj_hhid,hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+  # gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- pa_hh$HHS_S02_HROST1 %>%
+  mutate(pj_hhid=resp_id,sett_pjid=fokontany) %>%
+  dplyr::select(sett_pjid,pj_hhid,
+                #gen_hd=, # in seperate module
+                ethn_hd =hhd_ethnic,
+                #relig_hd =, # no data
+                tm_vl_hd=hhd_vres,
+                brn_vl_hd=hhd_vborn
+                  ) %>%
+  mutate(ethn_hd = factor(ethn_hd, labels = c("Betsimisaraka", "Sihanaka", "Bezanozano", 
+                                      "Merina", "Other"))) %>%
+  mutate(tm_vl_hd = tm_vl_hd) %>%
+  mutate(brn_vl_hd = factor(brn_vl_hd, labels= c("no","yes"))) %>%
+    full_join(att_tmp,.)
+
+att_tmp <- pa_hh$HHS_S03_HROST2 %>%
+  mutate(pj_hhid=resp_id,sett_pjid=fokontany) %>%
+  filter(rel_hhd==0) %>%
+  mutate(gen_hd=factor(sex,labels=c("female","male"))) %>%
+  mutate(relig_hd=NA) %>%
+  select(pj_hhid, sett_pjid, gen_hd) %>%
+  full_join(att_tmp,.)
+
+
+att_tmp <- subset(att_tmp, att_tmp$pj_hhid!="AMF014" | gen_hd!="female")
+
+  #   elt_occup  # elite occupation in household
+  att_tmp <- pa_hh$HHS_S03_HROST2 %>%
+  mutate(pj_hhid=resp_id,sett_pjid=fokontany) %>%
+    group_by(sett_pjid,pj_hhid) %>%
+    summarise(elt_occup = ifelse(c(2) %in% main_occup |
+                                   c(3) %in% main_occup ,"yes","no")) %>% # governemtn or private sector
+    ungroup() %>%
+    mutate(elt_occup = as.factor(elt_occup)) %>%
+    select(sett_pjid,pj_hhid,elt_occup) %>%
+    full_join(att_tmp,.)
+  
+   
+  ### tenure
+  # based on numer of plots reported
+  att_tmp <- pa_hh$HHS_S06_LAND %>%
+    mutate(pj_hhid=resp_id,sett_pjid=fokontany) %>%
+    group_by(sett_pjid,pj_hhid) %>%
+    summarise(tn_own = length(plot_ownership[plot_ownership %in% c(1,3) & # inherited or bought, notlent
+                                           plot_let_rented!=2 ]),
+    tn_rnt = length(plot_ownership[plot_ownership %in% c(2)]), # rented
+    tn_brw = length(plot_ownership[plot_ownership %in% c(4)]),# borrowed
+    tn_inf = length(plot_ownership[plot_ownership %in% c(5,6)]), # cleared, or other informal
+    tn_lsd = length(plot_ownership[plot_ownership %in% c(1,3) & # rented out
+                                           plot_let_rented==2 ])) %>%
+    ungroup() %>%
+    select(sett_pjid,pj_hhid,tn_own:tn_lsd) %>%
+    full_join(att_tmp,.)
+  
+  att_tmp$pjnm <- "pa"
+  pa_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_p4ges.csv")
+
+```
+
+**7. PIMA **
+```{r pima, message = FALSE, warning = FALSE}
+
+#### a) get data #####################
+
+## just using household head survey
+
+## i) household head survey
+pi_hh <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                         "../data/raw/sango/PIMA/2-PIMA_HHHEAD/PIMA_HHHEAD_SURVEY.CSV")
+
+# deal with null values
+pi_hh[pi_hh=="null"] <- NA
+pi_hh[pi_hh==-7] <- NA
+pi_hh[pi_hh==-8] <- NA
+pi_hh[pi_hh==-9] <- NA
+pi_hh[pi_hh==""] <- NA
+
+# the following households has data entry errors so removing
+# household 692, village 7. Q10 
+pi_hh <- subset(pi_hh, !(pi_hh$q1.1 == 7) | !(pi_hh$q1.2 == 692))
+# household 369. vullage 30. q4.2.5
+pi_hh <- subset(pi_hh, !(pi_hh$q1.1 == 30) | !(pi_hh$q1.2 == 369))
+
+# make unique household ID
+pi_hh$IDNO <- paste0(pi_hh$q1.1,"_",pi_hh$q1.2,sep="")
+
+## ii) wife survey
+
+# household wife survey
+pi_wf <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                         "../data/raw/sango/PIMA/3-PIMA_WIFE/PIMA_WIFE_SURVEY.CSV")
+# deal with null values
+pi_wf[pi_wf=="null"] <- NA
+pi_wf[pi_wf==-7] <- NA
+pi_wf[pi_wf==-17] <- NA
+pi_wf[pi_wf==-8] <- NA
+pi_wf[pi_wf==-9] <- NA
+pi_wf[pi_wf==""] <- NA
+# make null NA
+pi_wf[pi_wf=="null"] <- NA
+
+# make unique ID
+pi_wf$IDNO <- paste0(pi_wf$q1.1,"-",pi_wf$q1.2,sep="")
+
+# get tribe list
+pi_tribes <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,
+                         "../data/raw/sango/PIMA/tribe_list.csv")
+names(pi_tribes)[1] <- "id" 
+
+## b) generate data in temporary dataframe  ###################################
+
+
+### labour profile
+
+  # hh_size, ppl_u15, ppl_o64
+att_tmp <- pi_hh %>%
+  mutate(pj_hhid=q1.2,sett_pjid=q1.1) %>%
+  dplyr::select(pj_hhid,sett_pjid,starts_with("q2.5")) %>%
+  mutate(q2.5.8 = replace(q2.5.8,q2.5.8==68,6)) %>% # fix a data entry issue
+  mutate(
+         hh_size = rowSums(.[-1:-2],na.rm=T),
+         ppl_u15 = rowSums(.[3:4],na.rm=T), # children under 10
+        ppl_o64 = rowSums(.[c(7,10)],na.rm=T)) %>% # adulst over 50
+  ungroup() %>%
+  select(sett_pjid,pj_hhid,hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+  # gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- pi_hh %>%
+  mutate(pj_hhid=q1.2,sett_pjid=q1.1) %>%
+  dplyr::select(sett_pjid,pj_hhid,
+                gen_hd=q2.0, # in seperate module
+                ethn_hd =q2.3,
+                #relig_hd =, # no data
+                tm_vl_hd=q2.12,
+                brn_vl_hd=q2.11,
+                age = q2.1
+                  ) %>%
+  mutate(tm_vl_hd = replace(tm_vl_hd,tm_vl_hd==2004,9)) %>% # fix a data entry issue
+  mutate(age = as.numeric(as.character( # convert age categories to midpoint of age bins
+    factor(age,labels=c(24,34,44,54,64,74,84,94))))) %>%
+  mutate(gen_hd = factor(gen_hd, labels = c("male","female")),
+         ethn_hd = factor(ethn_hd, # add tribe names
+                          labels = pi_tribes$tribe_name[match(levels(
+                            factor(ethn_hd)), pi_tribes$id)]),
+         tm_vl_hd = coalesce(as.numeric(tm_vl_hd), # time in village, otherwise age if born
+                             age),
+         brn_vl_hd = factor(brn_vl_hd, labels = c("yes","no")),
+         relig_hd = NA
+         ) %>%
+    full_join(att_tmp,.)
+
+  # elite occupation in household
+  # not available
+  att_tmp$elt_occup <- NA
+   
+  ### tenure
+  # only land owned available
+  att_tmp$tn_own <- pi_hh$q5.1.1
+  att_tmp$tn_rnt <- NA
+  att_tmp$tn_brw <- NA
+  att_tmp$tn_inf <- NA
+  att_tmp$tn_lsd <- NA
+  
+  # update pj_hhid
+  att_tmp$pj_hhid <- paste(att_tmp$sett_pjid,att_tmp$pj_hhid,sep="_")
+  
+  att_tmp$pjnm <- "pi"
+  pi_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_pima.csv")
+
+
+```
+
+**8. ACES **
+```{r aces, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+nm <- list.files("../data/raw/sango/ACES/HHSURVEY/data",full.names=T)
+ac_hh <- list()
+for (i in 1:length(nm)){
+  ac_hh[[i]] <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm[i])
+  names(ac_hh)[i] <- strsplit(nm[i],"/")[[1]][8]
+  names(ac_hh)[i] <- strsplit( names(ac_hh)[i],"_anon")[[1]][1]
+  names(ac_hh)[i] <- strsplit( names(ac_hh)[i],"_che")[[1]][1]
+  ac_hh[[i]][ac_hh[[i]]==""] <- NA # convert NAs
+  ac_hh[[i]][ac_hh[[i]]=="skipped"] <- NA
+  ac_hh[[i]][ac_hh[[i]]=="nao_sabe"] <- NA
+  ac_hh[[i]][ac_hh[[i]]=="unknown"] <- NA
+  ac_hh[[i]][ac_hh[[i]]=="Mucavango_2_not_on_frame"] <- # correct a village name
+    "Mucavango_2"
+}
+
+## b) generate data in temporary dataframe  ###################################
+
+ # hh_size, ppl_u15, ppl_o64
+att_tmp <- ac_hh$b_household %>%
+  mutate(pj_hhid=hh_survey_id) %>%
+  group_by(pj_hhid) %>%
+  summarise(
+         hh_size = length(age_years[!is.na(age_years)])+1,
+         ppl_u15 = length(age_years[!is.na(age_years) & age_years<15]),
+          ppl_o64 = length(age_years[!is.na(age_years) & age_years>64])) %>%
+  ungroup() %>%
+  select(pj_hhid,hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+  # gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- ac_hh$b_household %>%
+  mutate(pj_hhid=hh_survey_id) %>%
+  group_by(hh_survey_id) %>% # get and add first entry from roster
+  filter(relationship_to_head=="Chefe") %>%
+  ungroup() %>%
+  mutate(age_years = replace(age_years,is.na(age_years),median(age_years,na.rm=T))) %>% # replace with med hh head age where unavaialbe
+  left_join(ac_hh$a_household,by="hh_survey_id") %>%
+  mutate(pj_hhid=hh_survey_id) %>%
+  dplyr::select(pj_hhid,
+                age = age_years,
+                residency = residency,
+                gen_hd = sex, # in seperate module
+                ethn_hd = ethnicity,
+                relig_hd = religion, # no data
+                tm_vl_hd=residence_years
+                # brn_vl_hd= # calculate after 
+                  ) %>%
+  # fix some vars and make tm_vl_hd
+  mutate(tm_vl_hd = replace(tm_vl_hd,tm_vl_hd==201,2001)) %>%
+  mutate(tm_vl_hd = ifelse(tm_vl_hd>1900,
+                            2014 - tm_vl_hd, tm_vl_hd)) %>%
+  mutate(tm_vl_hd = replace(tm_vl_hd, residency=="always",age)) %>% # age when always in village
+  mutate(tm_vl_hd = replace(tm_vl_hd, residency=="above1yr",age)) %>%
+  mutate(tm_vl_hd = replace(tm_vl_hd, residency=="below1yr",0)) %>%
+  # other vars
+  mutate(gen_hd = factor(gen_hd),
+         ethn_hd = factor(ethn_hd),
+         relig_hd = factor(relig_hd),
+         brn_vl_hd = factor(ifelse(tm_vl_hd<age,"no","yes"))) %>%
+    select(pj_hhid,gen_hd:brn_vl_hd) %>%
+    full_join(att_tmp,.,by="pj_hhid")
+
+  #   elite occupation in household
+  tmp <-   read.csv("../data/proc/initial/aces_occ_list.csv") # get coded occupation list
+
+  att_tmp <- bind_rows(select(ac_hh$h_business,pj_hhid=hh_id,desc=type), # get relevant dataframes
+                 select(ac_hh$h_other_income,pj_hhid=hh_id,desc=other_income_type),
+                 select(ac_hh$h_wage,pj_hhid=hh_id,desc=wage_labor_type)) %>%
+    mutate(elt_occup = as.character(factor(desc, labels =tmp$elite))) %>%
+    select(pj_hhid,elt_occup) %>%
+    mutate(elt_occup = replace_na(elt_occup,0)) %>%
+    group_by(pj_hhid) %>%
+    summarise(elt_occup = max(elt_occup,na.rm=T)) %>%
+    ungroup() %>%
+    full_join(att_tmp,.,by="pj_hhid") %>%
+    mutate(elt_occup = as.factor(replace_na(elt_occup,0)))
+  
+   
+  ### tenure
+  # based on numer of plots reported
+  att_tmp <- ac_hh$g_land_extra.csv %>%
+    mutate(pj_hhid=hh_id) %>%
+      mutate(tenure_code = as.numeric(factor(land_use_rights))) %>% # make tenure codes
+    group_by(pj_hhid) %>%
+    summarise(
+      tn_own = sum(area_owned[tenure_code %in% c(2:6,11:14,16,17)],na.rm=T), # code by tenure code
+      tn_rnt = NA, # no data
+      tn_brw = sum(area_owned[tenure_code %in% c(7:9)],na.rm=T),
+      tn_inf = sum(area_owned[tenure_code %in% c(10,15)],na.rm=T),
+      tn_lsd = sum(area_owned[tenure_code %in% c(1)],na.rm=T)) %>%
+    ungroup() %>%
+    select(pj_hhid,tn_own:tn_lsd) %>%
+    full_join(att_tmp,.) %>%
+    mutate_at(vars(tn_own:tn_lsd),~replace(.,is.na(.),0))
+
+# bind sett_pjid
+  att_tmp <- ac_hh$a_household %>%
+    select(pj_hhid=hh_survey_id,sett_pjid=village) %>%
+    full_join(att_tmp,by="pj_hhid")
+    
+
+  att_tmp$pjnm <- "ac"
+  ac_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_aces.csv")
+
+```
+
+**9. SENTINEL **
+```{r sentinel, message = FALSE, warning = FALSE}
+
+#### a) get data in list of csvs #####################
+
+sen <- list()
+nm <- c("sett","assoc","for","prod","hh","af")
+for(i in 1:6){
+  sen[[i]] <- openxlsx::read.xlsx("../data/raw/sentinel/ATREE-WGSL_Data.xlsx",
+                 sheet = i, colNames=TRUE)
+  names(sen)[i] <- nm[i]
+  sen[[i]] <- as.data.frame(sapply(sen[[i]],function(x) gsub("  .*","",x))) # convert weird spaces to NAs
+  sen[[i]][sen[[i]]==""] <- NA
+  sen[[i]][sen[[i]]==" "] <- NA
+  sen[[i]][sen[[i]]==-96] <- NA
+  sen[[i]][sen[[i]]=="-96"] <- NA
+  
+  sen[[i]][sen[[i]]=="CHAMARAJANAGARA"] <- "CHAMARAJANAGAR" # fix some names
+  sen[[i]][sen[[i]]=="Chamarajanagar"] <- "CHAMARAJANAGAR"
+  sen[[i]][sen[[i]]=="Kodagu"] <- "KODAGU"
+  
+}
+
+sen$hh$IDNO <- paste(sen$hh$HHID,sen$hh$SID,sep="_") # make unique hh id vil + site
+
+sen$hh$HRESY <- as.character(sen$hh$HRESY)
+sen$hh$HRESY[sen$hh$HRESY==-96] <- NA
+
+y <- sen$hh %>%
+  select(contains("OWNSHP"),contains("DISTANCE")) %>%
+  filter_at(vars(contains("OWNSHP")), any_vars(grepl("3",.,fixed=T)))
+
+## b) generate data in temporary dataframe  ###################################
+
+# hh_size, ppl_u15, ppl_o64
+att_tmp <- sen$hh %>%
+  mutate(pj_hhid=IDNO,sett_pjid=SID) %>%
+  select(pj_hhid,sett_pjid,starts_with("HHMAGE")) %>%
+  mutate_at(vars(starts_with("HHMAGE")),funs(as.numeric(.))) %>%
+  mutate(
+         hh_size = rowSums(!is.na(select(.,starts_with("HHMAGE"))),na.rm=T),
+         ppl_u15 = rowSums(select(.,starts_with("HHMAGE"))<15,na.rm=T),
+          ppl_o64 = rowSums(select(.,starts_with("HHMAGE"))>64,na.rm=T)) %>%
+  ungroup() %>%
+  select(pj_hhid,sett_pjid, hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+  
+  # get gender and age of HH head. 
+  tmp <- sen$hh %>%
+    mutate(pj_hhid=IDNO,sett_pjid=SID) %>%
+    # stack variables from DF
+    mutate_at(vars(starts_with("HHMRSHP"),starts_with("HHMSEX"),
+                   starts_with("HHMAGE")), 
+              funs(as.numeric(as.character(.)))) %>%
+    data.frame(
+      pj_hhid = rep(.$pj_hhid,12),
+      sett_pjid = rep(.$sett_pjid,12),
+      hd = stack(select(.,starts_with("HHMRSHP"))),
+      sex = stack(select(.,starts_with("HHMSEX"))),
+      age = stack(select(.,starts_with("HHMAGE")))) %>%
+    select(pj_hhid.1:age.ind) %>%
+    # get hh head
+    filter(hd.values==1)
+  
+  # gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- sen$hh %>%
+  mutate(pj_hhid=IDNO,sett_pjid=SID) %>%
+  right_join(tmp,by=c("pj_hhid" = "pj_hhid.1", # add hh head info
+                      "sett_pjid" = "sett_pjid.1")) %>%
+  mutate(
+    age = age.values,            
+    gen_hd = factor(sex.values, labels = c("male","female")),
+    ethn_hd = NA, # no data
+    relig_hd = NA, # no data
+    tm_vl_hd = 2014 - as.numeric(as.character(.$HRESY)),
+    brn_vl_hd = factor(.$HRES,labels=c("yes","no"))
+                  ) %>%
+    mutate(tm_vl_hd = replace(tm_vl_hd,is.na(tm_vl_hd),age)) %>%
+    mutate(tm_vl_hd = replace(tm_vl_hd,tm_vl_hd>age,age)) %>%
+    select(pj_hhid,sett_pjid,gen_hd:brn_vl_hd) %>%
+    full_join(att_tmp,.)
+    
+  #   elite occupation in household
+  
+    # get coded occupation list
+    tmp <-   read.csv("../data/proc/initial/sen_occ_list_in.csv")
+  
+  att_tmp <- sen$hh %>%
+    mutate(pj_hhid=IDNO,sett_pjid=SID) %>%
+    # stack variables from DF
+    mutate_at(vars(starts_with("HHMOCCP")),
+              funs(as.character(.))) %>%
+     data.frame(
+      pj_hhid = rep(.$pj_hhid,12),
+      sett_pjid = rep(.$sett_pjid,12),
+      occ = stack(select(.,starts_with("HHMOCCP")))) %>%
+    mutate(elt_occup = as.numeric(as.character(
+      factor(occ.values,labels=tmp$elite)))) %>% # substitute elite codes
+    group_by(pj_hhid,sett_pjid) %>%
+    summarise(elt_occup = ifelse(1 %in% elt_occup,1,0)) %>%
+    ungroup() %>%
+    select(pj_hhid,sett_pjid,elt_occup) %>%
+    right_join(att_tmp,.)
+   
+  ### tenure
+  # based on numer of plots reported
+  att_tmp <- sen$hh %>%
+    mutate(pj_hhid=IDNO,sett_pjid=SID) %>%
+    select(pj_hhid,sett_pjid,PSIZE_1:POWNSHP_5) %>%
+    mutate_all(as.character) %>%
+    data.frame(
+      pj_hhid = rep(.$pj_hhid,5),
+      sett_pjid = rep(.$sett_pjid,5),
+      sz = stack(select(.,starts_with("PSIZE"))),
+      un = stack(select(.,starts_with("USIZE"))),
+      ten = stack(select(.,starts_with("PTENURE"))),
+      own = stack(select(.,starts_with("POWN")))
+    ) %>%
+  mutate(un.values = as.numeric(as.character( # convert units from acresa and kunte to ha
+    factor(un.values,labels=c(0.4,0.01))
+  ))) %>%
+    mutate_at(vars(sz.values, ten.values, own.values),
+              ~as.numeric(.)) %>%
+    mutate(sz.values = sz.values * un.values) %>%
+    group_by(pj_hhid,sett_pjid) %>%
+    summarise(
+      tn_own = sum(sz.values[own.values %in% c(1,2,3)],na.rm=T),
+      tn_rnt = sum(sz.values[own.values %in% c(5)],na.rm=T),
+      tn_brw = sum(sz.values[own.values %in% c(4)],na.rm=T),
+      tn_inf = sum(sz.values[own.values %in% c(6)],na.rm=T),
+      tn_lsd = NA # no data
+      ) %>%
+    full_join(att_tmp,.)
+  
+
+  
+  att_tmp$pjnm <- "sen"
+  sen_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_sentinel.csv")
+
+```
+
+**10. ASSETS - COLOMBIA **
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+# ASSETS did surveys in two rounds. 
+# - keeping responses from 1st survye for these variables which shouldn't vary between waves
+# - both rounds are in the survey and can be aggregate latter if needed
+
+nm1 <- list.files("../data/raw/assets_colombia_initial_unpublished/Colombia/W1CSV",pattern="*.csv",full.names=T)
+nm2 <- list.files("../data/raw/assets_colombia_initial_unpublished/Colombia/W2CSV",pattern="*.csv",full.names=T)
+asc_hh <- list()
+for (i in 1:length(nm1)){
+  wv1 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm1[i])
+  wv1$wv <- 1 # wave number
+  wv1$IDNO <- paste(wv1$wv,wv1$Resguardo, wv1$Comunidad, 
+                    wv1$Hogar,sep="_") # unique response ID
+  wv2 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm2[i])
+  names(wv2) <- gsub( "W2", "", names(wv2)) # fix wv2 names
+  wv2$wv <- 2 # wave number
+  wv2$IDNO <- paste(wv2$wv,wv2$Resguardo, wv2$Comunidad, 
+                    wv2$Hogar,sep="_") # unique response ID
+  asc_hh[[i]] <- plyr::rbind.fill(wv1,wv2)
+  names(asc_hh)[i] <- strsplit(nm1[i],"/")[[1]][7]
+  names(asc_hh)[i] <- paste0(strsplit(names(asc_hh)[i],"_")[[1]][c(3,5)],collapse="_")
+  names(asc_hh)[i] <- stringr::str_sub(names(asc_hh)[i],1,-5)
+  
+  # convert NAs
+  asc_hh[[i]][asc_hh[[i]]==""] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-999"] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-998"] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-997"] <- NA
+  asc_hh[[i]][asc_hh[[i]]=="-888"] <- NA
+  asc_hh[[i]]$hhid <- paste(asc_hh[[i]]$Resguardo, # add hhid
+                            asc_hh[[i]]$Comunidad,
+                            asc_hh[[i]]$Hogar, sep="_")
+}
+
+
+## b) generate data in temporary dataframe  ###################################
+
+ # hh_size, ppl_u15, ppl_o64
+att_tmp <- asc_hh$B_Roster %>%
+  #filter(grepl("1_", IDNO)) %>% # keep first wave
+  mutate(pj_hhid=IDNO,sett_pjid=Comunidad) %>%
+  group_by(pj_hhid,sett_pjid,hhid) %>%
+  summarise(
+         hh_size = length(b_4_a[!is.na(b_4_a)])+1,
+         ppl_u15 = length(b_4_a[!is.na(b_4_a) & b_4_a<15]),
+          ppl_o64 = length(b_4_a[!is.na(b_4_a) & b_4_a>64])) %>%
+  ungroup() %>%
+  select(pj_hhid,sett_pjid,hhid,hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+# gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- asc_hh$B_Roster %>%
+  mutate(pj_hhid=IDNO,sett_pjid=Comunidad) %>%
+  group_by(pj_hhid,hhid,sett_pjid) %>%
+  # get person with max age if hh head not in roster
+  mutate(hhd = ifelse(b_3 == "Head of HH","hhd","n")) %>%
+  mutate(hhd = replace(hhd, is.na(hhd), "n")) %>%
+  mutate(ma = ifelse(b_4_a == max(b_4_a,na.rm=T),"hhd","n")) %>%
+  mutate(hhd2 = ifelse(hhd=="n",ma,hhd)) %>%
+  filter(hhd2=="hhd") %>%
+  filter(HHMemberID == max(HHMemberID)) %>%
+  #group_by(pj_hhid,hhid,sett_pjid) %>%
+  summarise(
+    age = b_4_a,
+    gen_hd = factor(b_2), # in seperate module
+    ethn_hd = factor(b_17),
+    relig_hd = factor(b_18),
+    tm_vl_hd= b_12,
+    brn_vl_hd= factor(b_9)
+  ) %>%
+    # assuming time in vill is age where not there
+  mutate(tm_vl_hd = replace(tm_vl_hd,is.na(tm_vl_hd),age)) %>%
+  # assuming NA ethnicity and relig is none
+  mutate(ethn_hd = replace(ethn_hd, is.na(ethn_hd), "None")) %>%
+  mutate(relig_hd = replace(relig_hd, is.na(relig_hd), "None")) %>%
+  # assuming gender is male where not there
+  mutate(gen_hd = replace(gen_hd, is.na(gen_hd), "Male")) %>%
+  full_join(att_tmp,.)
+
+  #   elite occupation in household
+  tmp <-   read.csv("../data/proc/initial/asc_occ_list.csv") # get coded occupation list
+  
+att_tmp <- bind_rows( # get relevant dataframes
+  select(asc_hh$M_BusinessRoster,pj_hhid=IDNO,sett_pjid=Comunidad,
+         desc=m_11,pres=m_11,hhid=hhid),
+  select(asc_hh$O_OtherIncomeRoster,pj_hhid=IDNO,sett_pjid=Comunidad,
+         desc=OtherIncomeID, pres = o_1,hhid=hhid)) %>%
+  mutate(pres = replace(pres, pres != "No","Yes")) %>% # remove non-responses
+  filter(pres=="Yes") %>%
+  mutate(elt_occup = as.numeric(as.character( # make occupations codes
+    factor(desc,labels=tmp$elite)))) %>%
+  group_by(pj_hhid,hhid,sett_pjid) %>%
+  summarise(elt_occup = ifelse(1 %in% elt_occup,1,0)) %>%
+  full_join(att_tmp,.) %>%
+  # assume NA means no elite occup
+  mutate(elt_occup = replace(elt_occup, is.na(elt_occup), 0))
+   
+  ### tenure
+  # based on numer of plots reported
+  att_tmp <- asc_hh$AGa_AgriPlotsRoster %>%
+    mutate(pj_hhid=IDNO,sett_pjid=Comunidad) %>%
+    select(pj_hhid,sett_pjid,hhid,sz=AGa_2_a,un=AGa_2_b,ten=AGa_11) %>%
+    mutate(un = as.numeric(as.character( # convert to Ha
+      factor(un,labels=c(1,1/10000))
+    ))) %>%
+    mutate(sz = sz * un) %>%
+    mutate(tencd = as.numeric(factor(ten))) %>%
+    group_by(pj_hhid,hhid,sett_pjid) %>%
+    summarise(
+      tn_own = sum(sz[tencd %in% c(2,4)],na.rm=T), 
+      tn_rnt = NA, # no data
+      tn_brw = sum(sz[tencd %in% c(1)],na.rm=T),
+      tn_inf = sum(sz[tencd %in% c(3)],na.rm=T),
+      tn_lsd = NA # no data
+    ) %>%
+    ungroup() %>%
+  full_join(att_tmp,.)
+
+# some questions only asked in wave 1 so need to add these to wave 2
+att_tmp <- att_tmp %>%
+  group_by(hhid) %>%
+  mutate_all(~replace(.,is.na(.),getmode(.))) %>%
+  ungroup()
+
+# tidy some remaing variables
+att_tmp <- att_tmp %>%
+  mutate_at(vars(tn_own,tn_brw,tn_inf), ~replace(., is.na(.),0))
+
+
+# fix hh ids so that does not include wave
+att_tmp$pj_hhid <- substring(att_tmp$pj_hhid,3)
+
+att_tmp <- att_tmp %>%
+  mutate(tpid = as.character(pj_hhid)) %>% # id for hh
+  mutate(tpid2 = as.numeric(factor(pj_hhid))) %>% # id for ties
+  group_by(pj_hhid) %>%
+  add_tally() %>%
+  group_by(tpid) %>%
+  filter(n == max(n)) %>% # get response with most information
+  filter(tpid2 == max(tpid2)) %>%
+  slice(1) %>% # keep first row where tie
+  ungroup() %>%
+  dplyr::select(-tpid,-tpid2,-n)
+
+
+att_tmp$pjnm <- "asc"
+asc_att <- att_tmp
+
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_assets_colombia.csv")
+
+
+
+```
+
+**ASSETS - PERU **
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+# ASSETS did surveys in two rounds. 
+# both rounds are in the survey and can be aggregate latter if needed
+nm1 <- list.files("../data/raw/assets_peru_initial_unpublished/Peru/Wave1/CSV",
+                  pattern="*.csv",full.names=T)
+nm2 <- list.files("../data/raw/assets_peru_initial_unpublished/Peru/Wave2/CSV",
+                  pattern="*.csv",full.names=T)
+asp_hh <- list()
+for (i in 1:length(nm1)){
+  wv1 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm1[i])
+  wv1$wv <- 1 # wave number
+  wv1$IDNO <- paste(wv1$wv,wv1$Pueblo, 
+                    wv1$Hogar,sep="_") # unique response ID
+  wv2 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm2[i])
+  names(wv2) <- gsub( "W2", "", names(wv2)) # fix wv2 names
+  wv2$wv <- 2 # wave number
+  wv2$IDNO <- paste(wv2$wv,wv2$Pueblo, 
+                    wv2$Hogar,sep="_") # unique response ID
+  asp_hh[[i]] <- plyr::rbind.fill(wv1,wv2)
+  names(asp_hh)[i] <- strsplit(nm1[i],"/")[[1]][8]
+  names(asp_hh)[i] <- paste0(strsplit(names(asp_hh)[i],"_")[[1]][c(3,5)],collapse="_")
+  names(asp_hh)[i] <- stringr::str_sub(names(asp_hh)[i],1,-5)
+  
+  # convert NAs
+  asp_hh[[i]][asp_hh[[i]]==""] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-999"] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-998"] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-997"] <- NA
+  asp_hh[[i]][asp_hh[[i]]=="-888"] <- NA
+  asp_hh[[i]]$hhid <- paste(asp_hh[[i]]$Pueblo, # add hhid
+                            asp_hh[[i]]$Hogar, sep="_")
+}
+
+
+## b) generate data in temporary dataframe  ###################################
+
+ # hh_size, ppl_u15, ppl_o64
+att_tmp <- asp_hh$B_Roster %>%
+  #filter(grepl("1_", IDNO)) %>% # keep first wave
+  mutate(pj_hhid=IDNO,sett_pjid=Pueblo) %>%
+  group_by(pj_hhid,sett_pjid) %>%
+  summarise(
+         hh_size = length(b_4_a[!is.na(b_4_a)])+1,
+         ppl_u15 = length(b_4_a[!is.na(b_4_a) & b_4_a<15]),
+          ppl_o64 = length(b_4_a[!is.na(b_4_a) & b_4_a>64])) %>%
+  ungroup() %>%
+  select(pj_hhid,sett_pjid,hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+  # gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- asp_hh$B_Roster %>%
+  mutate(pj_hhid=IDNO,sett_pjid=Pueblo) %>%
+  filter(b_3=="Head of HH") %>%
+  group_by(pj_hhid,sett_pjid) %>%
+  summarise(
+    age = b_4_a,
+    gen_hd = factor(b_2), # in seperate module
+    ethn_hd = factor(b_17),
+    relig_hd = factor(b_18),
+    tm_vl_hd= b_12,
+    brn_vl_hd= factor(b_9)
+  ) %>%
+  mutate(tm_vl_hd = replace(tm_vl_hd,is.na(tm_vl_hd),age)) %>%
+  full_join(att_tmp,.)
+
+  #   elite occupation in household
+  tmp <-   read.csv("../data/proc/initial/asp_occ_list.csv") # get coded occupation list
+  
+att_tmp <- bind_rows( # get relevant dataframes
+  select(asp_hh$M_BusinessRoster,pj_hhid=IDNO,sett_pjid=Pueblo,
+         desc=m_11,pres=m_11),
+  select(asp_hh$O_OtherIncomeRoster,pj_hhid=IDNO,sett_pjid=Pueblo,
+         desc=OtherIncomeID, pres = o_1)) %>%
+  mutate(pres = replace(pres, pres != "No","Yes")) %>% # remove non-responses
+  filter(pres=="Yes") %>%
+  mutate(elt_occup = as.numeric(as.character( # make occupations codes
+    factor(desc,labels=tmp$elite)))) %>%
+  group_by(pj_hhid,sett_pjid) %>%
+  summarise(elt_occup = ifelse(1 %in% elt_occup,1,0)) %>%
+  full_join(att_tmp,.)
+   
+  ### tenure
+  # based on numer of plots reported
+  att_tmp <- asp_hh$AGa_AgriPlotsRoster %>%
+    mutate(pj_hhid=IDNO,sett_pjid=Pueblo) %>%
+    select(pj_hhid,sett_pjid,sz=AGa_2_a,un=AGa_2_b,ten=AGa_11) %>%
+    mutate(un = as.numeric(as.character( # convert to Ha
+      factor(un,labels=c(1,1/10000))
+    ))) %>%
+    mutate(sz = sz * un) %>%
+    mutate(tencd = as.numeric(factor(ten))) %>%
+    group_by(pj_hhid,sett_pjid) %>%
+    summarise(
+      tn_own = sum(sz[tencd %in% c(2,3,4,7,9,10)],na.rm=T), 
+      tn_rnt = sum(sz[tencd %in% c(5,8,11)],na.rm=T),
+      tn_brw = sum(sz[tencd %in% c(1,12)],na.rm=T),
+      tn_inf = sum(sz[tencd %in% c(6)],na.rm=T),
+      tn_lsd = NA # no data
+    ) %>%
+  full_join(att_tmp,.)
+
+# fix hh ids so that does not include wave
+att_tmp$pj_hhid <- substring(att_tmp$pj_hhid,3)
+
+# keep most complete responses for each household
+att_tmp <- att_tmp %>%
+  mutate(tpid = as.character(pj_hhid)) %>% # id for hh
+  mutate(tpid2 = as.numeric(factor(pj_hhid))) %>% # id for ties
+  group_by(pj_hhid) %>%
+  add_tally() %>%
+  group_by(tpid) %>%
+  filter(n == max(n)) %>% # get response with most information
+  filter(tpid2 == max(tpid2)) %>%
+  slice(1) %>% # keep first row where tie
+  ungroup() %>%
+  dplyr::select(-tpid,-tpid2,-n)
+    
+att_tmp$pjnm <- "asp"
+  asp_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_assets_peru.csv")
+
+
+
+```
+
+**ASSETS - MALAWI **
+```{r assets, message = FALSE, warning = FALSE}
+
+#### a) get all data csvs in list object  #####################
+# ASSETS did surveys in two rounds. 
+# both rounds are in the survey and can be aggregate latter if needed
+nm1 <- list.files("../data/raw/assets_malawi_initial_unpublished/Wave1",
+                  pattern="*.csv",full.names=T)
+nm2 <- list.files("../data/raw/assets_malawi_initial_unpublished/Wave2",
+                  pattern="*.csv",full.names=T)
+asm_hh <- list()
+for (i in 1:length(nm1)){
+  wv1 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm1[i])
+  wv1$wv <- 1 # wave number
+  wv1$IDNO <- paste(wv1$wv,wv1$FINALCODE,sep="_") # unique response ID
+  wv2 <- read.csv(encoding="UTF-8",stringsAsFactors = FALSE,nm2[i])
+  names(wv2) <- gsub( "W2", "", names(wv2)) # fix wv2 names
+  wv2$wv <- 2 # wave number
+  wv2$IDNO <- paste(wv2$wv,wv2$Hogar,sep="_") # unique response ID
+  asm_hh[[i]] <- plyr::rbind.fill(wv1,wv2)
+  names(asm_hh)[i] <- strsplit(nm1[i],"/")[[1]][6]
+  names(asm_hh)[i] <- paste0(strsplit(names(asm_hh)[i],"_")[[1]][4],collapse="_")
+  names(asm_hh)[i] <- stringr::str_sub(names(asm_hh)[i],1,-5)
+  
+  # convert NAs
+  asm_hh[[i]][asm_hh[[i]]==""] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-999"] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-998"] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-997"] <- NA
+  asm_hh[[i]][asm_hh[[i]]=="-888"] <- NA
+  # asm_hh[[i]]$hhid <- paste(asm_hh[[i]]$Pueblo, # add hhid
+  #                           asm_hh[[i]]$Hogar, sep="_")
+}
+
+# check fire wood travel time
+# y <- asm_hh$Housing %>%
+#   group_by(h_18_b) %>%
+#   summarise(n = n(), md = median(h_18_a, na.rm=T), mx = max(h_18_a, na.rm=T))
+# median(y$md,na.rm=T)
+# 
+# ## other construction matierails travel time
+# yy <- asm_hh$Housing %>%
+#   dplyr::select(h_43_b:h_43_e,mins=h_51_a,tprt=h_51_b) %>%
+#   data.frame(res=c(.$h_43_b,.$h_43_c,.$h_43_d,.$h_43_e),
+#              mins=rep(.$mins,4),
+#              tprt=rep(.$tprt,4)) %>%
+#   dplyr::select(res,mins,tprt) %>%
+#   group_by(tprt,res) %>%
+#   summarise(n = n(), md = median(mins, na.rm=T), mx = max(mins, na.rm=T))
+# median(yy$md,na.rm=T)
+# 
+# ## food travel time
+# yyy <- asp_hh$I_FoodRoster %>%
+#   dplyr::select(FoodID,mins=i_9_a,tprt=i_9_b) %>%
+#   drop_na() %>%
+#   group_by(tprt,FoodID) %>%
+#   summarise(n = n(), md = median(mins, na.rm=T), mx = max(mins, na.rm=T))
+# median(yyy$md,na.rm=T)
+
+## b) generate data in temporary dataframe  ###################################
+
+ # hh_size, ppl_u15, ppl_o64
+att_tmp <- asm_hh$HHRoster %>%
+  #filter(grepl("1_", IDNO)) %>% # keep first wave
+  mutate(pj_hhid=IDNO,sett_pjid=Village) %>%
+  group_by(pj_hhid,sett_pjid) %>%
+  summarise(
+         hh_size = length(b_4_a[!is.na(b_4_a)])+1,
+         ppl_u15 = length(b_4_a[!is.na(b_4_a) & b_4_a<15]),
+          ppl_o64 = length(b_4_a[!is.na(b_4_a) & b_4_a>64])) %>%
+  ungroup() %>%
+  select(pj_hhid,sett_pjid,hh_size:ppl_o64)
+  
+  # dep_rat = as.numeric(), # dependency ratio ppl_u15 + ppl_o64 / hh_size
+  att_tmp$dep_rat <- (att_tmp$ppl_u15 + att_tmp$ppl_o64) / att_tmp$hh_size
+  
+### social grouping
+
+  # gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- asm_hh$HHRoster %>%
+  mutate(pj_hhid=IDNO,sett_pjid=Village) %>%
+  filter(b_3=="Head of HH") %>%
+  group_by(pj_hhid,sett_pjid) %>%
+  summarise(
+    age = b_4_a,
+    gen_hd = factor(b_2), # in seperate module
+    ethn_hd = factor(b_17),
+    relig_hd = factor(b_18),
+    tm_vl_hd= b_12,
+    brn_vl_hd= factor(b_9)
+  ) %>%
+  mutate(tm_vl_hd = replace(tm_vl_hd,is.na(tm_vl_hd),age)) %>%
+  full_join(att_tmp,.)
+
+  #   elite occupation in household
+  # using livelihood dataframe because it is cleaned
+
+  # read livelihood dataframe
+  tmp1 <- read.csv("../data/proc/anamika_stata_dat/asm_lvl_sources.csv")
+  
+  # set up and read occupation coding
+  #tmp2 <- as.data.frame(unique(tmp1$ncp_orig[tmp$sv_sec %in% c("hh business", "other income")]))
+  # write.csv(tmp2, "../data/proc/initial/asm_occ_list.csv")
+  tmp2 <-   read.csv("../data/proc/initial/asm_occ_list.csv") # get coded occupation list
+  
+  # merge survey ids with tmp1
+  tmp3 <- unique(asm_hh$HHRoster[c("FINALCODE","IDNO")])
+  names(tmp3) <- c("hh_id","IDNO")
+  tmp3 <- left_join(tmp1,tmp3)
+  tmp3 <- tmp3[tmp3$sv_sec %in% c("hh business", "other income"),]
+  
+  
+  # make variables
+  att_tmp <- tmp3 %>%
+    left_join(tmp2, by = "ncp_orig") %>%
+    group_by(hh_id, IDNO) %>%
+    summarise(elt_occup = max(elite, na.rm=T)) %>%
+    mutate(elt_occup = replace(elt_occup, which(is.na(elt_occup)),0)) %>%
+    mutate(hh_id = as.character(hh_id)) %>%
+    left_join(att_tmp,., by = c("pj_hhid" = "IDNO")) %>%
+    mutate(elt_occup = replace(elt_occup, which(is.na(elt_occup)),0)) %>%
+    select(-hh_id)
+   
+  ### tenure
+  # based on numer of plots reported
+
+  att_tmp <- asm_hh$HHAgriPlotsRoster %>%
+    mutate(pj_hhid=IDNO,sett_pjid=Village) %>%
+    select(pj_hhid,sett_pjid,sz_init=AGa_2_a,un_init=AGa_2_b,ten=AGa_11) %>%
+    # fix one variable
+    mutate(un_init = replace(un_init, pj_hhid=="1_5a4138  ","Sq. meters")) %>%
+    mutate(un = as.numeric(as.character( # convert to Ha
+      factor(un_init,labels=c(2.4,1,1,1/10000))
+    ))) %>%
+    mutate(sz = sz_init * un) %>%
+    mutate(tencd = as.numeric(factor(ten))) %>%
+    group_by(pj_hhid,sett_pjid) %>%
+    summarise(
+      tn_own = sum(sz[tencd %in% c(2,4,5,9,10)],na.rm=T),
+      tn_rnt = sum(sz[tencd %in% c(3,6,11)],na.rm=T),
+      tn_brw = sum(sz[tencd %in% c(1)],na.rm=T),
+      tn_inf = sum(sz[tencd %in% c(7,8)],na.rm=T),
+      tn_lsd = NA # no data
+    ) %>%
+    mutate(sett_pjid = as.integer(sett_pjid)) %>%
+  full_join(att_tmp,.)
+
+  # sort pj_hhid
+    # sort pj_hhid
+  att_tmp$pj_hhid <- gsub(".*_","",att_tmp$pj_hhid)
+
+att_tmp <- att_tmp %>%
+  mutate(tpid = as.character(pj_hhid)) %>% # id for hh
+  mutate(tpid2 = as.numeric(factor(pj_hhid))) %>% # id for ties
+  group_by(pj_hhid) %>%
+  add_tally() %>%
+  group_by(tpid) %>%
+  filter(n == max(n)) %>% # get response with most information
+  filter(tpid2 == max(tpid2)) %>%
+  slice(1) %>% # keep first row where tie
+  ungroup() %>%
+  dplyr::select(-tpid,-tpid2,-n)
+
+
+
+## sort pj_hhid
+
+att_tmp$pjnm <- "asm"
+  asm_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_assets_malawi.csv")
+
+
+```
+
+**ORISSA**
+```{r assets, message = FALSE, warning = FALSE}
+require(foreign)
+#### a) get all data in list object  #####################
+
+nm1 <- list.files("../data/raw/orissa_unpublished",
+                  pattern="*.dta",full.names=T)
+od_hh <- list()
+for (i in 1:length(nm1)){
+  tp <- read.dta(nm1[i])
+  od_hh[[i]] <- tp
+  names(od_hh)[i] <- strsplit(nm1[i],"/")[[1]][5]
+  names(od_hh)[i] <- stringr::str_sub(names(od_hh)[i],1,-5)
+  # convert NAs
+  # asp_hh[[i]][asp_hh[[i]]==""] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-999"] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-998"] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-997"] <- NA
+  # asp_hh[[i]][asp_hh[[i]]=="-888"] <- NA
+  # asp_hh[[i]]$hhid <- paste(asp_hh[[i]]$Pueblo, # add hhid
+  #                           asp_hh[[i]]$Hogar, sep="_")
+}
+
+od_hh$C.Land_Odisha$Site_code <- # align site ID data types 
+  factor(od_hh$C.Land_Odisha$Site_code, 
+         labels=levels(od_hh$A.hh_roaster_Odisha$Site_code))
+
+od_hh$H.Fuelwood_timber_bamboo_Odisha %>%
+  select(ends_with("_dis")) %>%
+  summary()
+
+summary(od_hh$H.Fuelwood_timber_bamboo_Odisha$FW_dis)
+
+## b) generate data in temporary dataframe  ###################################
+
+ # hh_size, ppl_u15, ppl_o64
+att_tmp <- od_hh$A.hh_roaster_Odisha %>%
+  mutate(pj_hhid = Vil_HH_Code, sett_pjid = Site_code) %>%
+  group_by(pj_hhid,sett_pjid) %>%
+  summarise(
+    hh_size = No_HH_members,
+    ppl_u15 = NA, # no data
+    ppl_o64 = NA # no data
+  ) %>%
+  ungroup()
+  
+### social grouping
+
+  # gen_hd,  relig,  brn_vill, tm_vill,ethn,
+att_tmp <- od_hh$A.hh_roaster_Odisha %>%
+  mutate(pj_hhid = Vil_HH_Code, sett_pjid = Site_code) %>%
+  mutate(
+    gen_hd = Sex, # in seperate module
+    ethn_hd = Caste,
+    relig_hd = NA, # no data
+    tm_vl_hd= NA,# no data
+    brn_vl_hd= NA # no data
+  ) %>%
+  dplyr::select(pj_hhid:brn_vl_hd) %>%
+  full_join(att_tmp,.)
+
+  #   elite occupation in household
+att_tmp$elt_occup <- NA # no data
+   
+  ### tenure
+  # based on numer of plots reported
+  att_tmp <- od_hh$C.Land_Odisha %>%
+    mutate(pj_hhid = Vil_HH_Code, sett_pjid = Site_code) %>%
+    mutate(
+      tn_own = rowSums(dplyr::select(.,OL_Dry,OL_Wet,OL_Pla,OL_FS,OL_FL),na.rm=T),
+      tn_rnt = Li_Shc,
+      tn_brw = NA, # no data
+      tn_inf = Occu_Lan,
+      tn_lsd = LiO
+      ) %>%
+    dplyr::select(pj_hhid:tn_lsd) %>%
+    full_join(att_tmp,.)
+    
+  
+  att_tmp$pjnm <- "od"
+  od_att <- att_tmp
+  
+# write data
+write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_assets_orissa.csv")
+
+
+
+```
+
+**MIYUN**
+```{r spaces, message = FALSE, warning = FALSE}
+
+#### a) get data #####################
+require(haven)
+miyun <- read_dta("C:/n4sdgs/r_analysis/data/raw/miyun/Miyun_Nat4SDGs.dta")
+miyun <- miyun %>% mutate_if(is.factor,as.character)
+
+miyun3 <- read_dta("C:/n4sdgs/r_analysis/data/raw/miyun/Miyun2015_hhwsums.dta")
+miyun3 <- miyun3 %>% mutate_if(is.factor,as.character)
+miyun3[miyun3==-99] <- NA
+
+## b) generate data in temporary dataframe  ###################################
+
+## ID VARIABLES AND DEMOGRAPHICS
+att_tmp <- data.frame(stringsAsFactors = F,
+  pj_hhid = as.character(miyun$hh_id),
+  pjnm = rep("mi",nrow(miyun)),
+  cn = "CHN"
+)
+
+### labour profile
+
+  # hh_size, ppl_u15, ppl_o64
+att_tmp <- miyun %>%
+  mutate(
+    hh_size = miyun$hhsize,
+    ppl_u15 = miyun$numkids,
+    ppl_o64 = miyun$numelderly
+  ) %>%
+  mutate(dep_rat = (ppl_u15 + ppl_o64) / hh_size) %>%
+  select(hh_size:ppl_o64) %>%
+  bind_cols(att_tmp,.)
+  
+### social grouping
+
+  # gen_hd, ethn, relig, tm_vill, brn_vill
+  att_tmp <- miyun %>%
+    mutate(
+      gen_hd = miyun$head_gend,
+      ethn_hd = NA, # no data
+      relig_hd = NA, # no data
+      tm_vl_hd = NA, # no data
+      brn_vl_hd = NA, # no data
+      elt_occup = ifelse(miyun$val_tertiary>0,1,0)  # no data
+    ) %>%
+    select(gen_hd:elt_occup) %>%
+  bind_cols(att_tmp,.)
+   
+  ### tenure
+  # owned means 'allocated to household'
+      # tn_own = rowSums(dplyr::select(.,OL_Dry,OL_Wet,OL_Pla,OL_FS,OL_FL),na.rm=T),
+      # tn_rnt = Li_Shc,
+      # tn_brw = NA, # no data
+      # tn_inf = Occu_Lan,
+      # tn_lsd = LiO
+  
+  att_tmp <- miyun3 %>%
+  dplyr::select(hh_id,
+                agland_hh,agland_rentvill,agland_renthh,
+                natforest_hh, natforest_rentvill, natforest_renthh,
+                econforest_hh, econforest_rentvill, agland_hh) %>%
+    mutate_at(vars(agland_hh:econforest_rentvill),~ifelse(.>=200,./10,.)) %>% # deal with some crazy values NA
+    mutate(tn_own = rowSums(select(.,contains("_hh")),na.rm=T),
+           tn_rnt = rowSums(select(.,contains("rent")),na.rm=T),
+           tn_brw = NA, # no data
+           tn_inf = NA,
+           tn_lsd = NA
+           ) %>%
+    mutate(pj_hhid=hh_id) %>%
+    dplyr::select(pj_hhid,contains("tn_")) %>%
+    left_join(att_tmp,"pj_hhid")
+  
+  mi_att <- att_tmp
+  
+  write.csv(att_tmp,"../data/proc/hh_att_data/hh_att_miyun.csv")
+  
+
+
+
+```
+
+```{r final, message = FALSE, warning = FALSE}
+
+## combine
+dfs <- c("sp_att","de_att","pa_att","pi_att","ac_att","sen_att","asc_att","asp_att","asm_att", "od_att","mi_att")
+
+hh_att <- list()
+
+for (i in dfs){
+  hh_att$tp <- mutate_all(get(i),as.character)
+  names(hh_att)[length(hh_att)] <- i
+  #tp <- mutate_all(get(i),as.character)
+  #n4s_hh_att <- bind_rows(n4s_hh_att, tp)
+}
+
+save(hh_att,file="../data/proc/hh_att_data/hh_att.rda" )
+
+```

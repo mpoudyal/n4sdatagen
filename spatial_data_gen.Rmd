@@ -1,0 +1,151 @@
+---
+title: "Generating variables from Co$tingNature"
+output:
+  pdf_document: default
+  word_document:
+    reference_docx: default
+  html_document: default
+---
+
+```{r setup,  message = FALSE, warning = FALSE, include=FALSE}
+#### 1. R SETUP ----
+## a) set wd if not already
+#if (grepl("n4s_git", getwd()) == TRUE){setwd(choose.dir(getwd()))}
+
+## b) check packages and install if needed
+check.packages <- function(pkg){
+      new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+      if (length(new.pkg))
+          install.packages(new.pkg, dependencies = TRUE,repos = "http://cran.us.r-project.org")
+  }
+check.packages(c("ggplot2","knitr","QCA","xlsx","VIM","mice","Hmisc",
+                 "grid","RColorBrewer","kableExtra","rgdal","raster","sp",
+                 "rgeos","maps","sf","maptools","gfcanalysis","ncdf4"))
+
+sapply(c("raster","rgdal","rgeos","maps","sf","lwgeom","dplyr"),require,character.only=T)
+
+## c) R markdown and knitr stuff
+knitr::opts_chunk$set(echo = TRUE) ; knitr::opts_chunk$set(root.dir = getwd())
+#options("scipen"=999)
+#library(kableExtra)
+```
+
+```{r functions, message = FALSE, warning = FALSE, include=FALSE}
+#### 2. FUNCTIONS ----
+
+## a) get general functions
+source('functions.R')
+
+## b) function to find utm zone
+lonlat2UTM = function(lonlat) {
+  utm = (floor((lonlat[1] + 180) / 6) %% 60) + 1
+  if(lonlat[2] > 0) {
+    utm + 32600
+  } else{
+    utm + 32700
+  }
+}
+
+## c) extract to n4s_scd a value from raster for custom buffer around centroid, with custom function
+# spdat: spatial points file, in WGS84 proj
+# indat: raster data file, in WGS84 proj
+# bf: radius of buffer in meters
+# nm: name of variable. as character.
+# fn: function for processing value
+ras_ext <- function(spdat,indat,bf,nm,fn){
+  print(nm)
+  # check CRS of inputs
+  print(crs(spdat)) 
+  print(crs(indat))
+  # get settlements without value
+  # tp <- spdat[is.na(spdat[nm])]
+  # if (length(tp) == 0){ # if all settlements have a value, end
+  #   return(n4s_scd)
+  # } else{ # otherwise generate new values:
+  # do buffer
+  spd <- gBuffer(spdat,byid=T)[0,]
+  for (i in 1:nrow(spdat)){
+    tp <- sf::st_crs(lonlat2UTM(coordinates(spdat[i,])))$proj4string # convert to UTM
+    tp <- spTransform(spdat[i,], CRS(tp))
+    tp <- sf::st_buffer(sf::st_as_sf(tp),bf) # make buffer
+    tp <- spTransform(as(tp,"Spatial"), raster::crs(spdat))  # back to WGS
+    spd <- rbind(spd,tp)
+  }
+  
+  # crop raster
+  rs <- crop(indat,spd)
+  for(i in 1:nrow(spd)){
+    ex <- raster::extract(rs, spd[i,], fun = fn,na.rm=T, df = T)
+    n4s_scd$var[i] <<- ex[1,ncol(ex)]
+  }
+  # extract from raster
+  
+  # if (nm %in% names(n4s_scd)){
+  #   n4s_scd[nm][nrow(n4s_scd)+i,] <<- ex[1,ncol(ex)]
+  #   
+  #   n4s_scd[nm][nrow(n4s_scd)+i,] <<- ex[1,ncol(ex)] # add to existing col if there
+  # } else {
+    # n4s_scd$var[i] <<- ex[1,ncol(ex)] # otherwise add col and value if no col
+    # names(n4s_scd)[ncol(n4s_scd)] <<- nm # rename
+  # }
+  # }
+  #n4s_scd$var <<- ex[1,ncol(ex)] # otherwise add col and value if no col
+  names(n4s_scd)[ncol(n4s_scd)] <<- nm # rename
+}
+
+```
+
+```{r cn, message = FALSE, warning = FALSE, include = FALSE, echo = FALSE}
+#### MAKE n4s_scd
+
+n4s_sp <- rgdal::readOGR(encoding="UTF-8", "../data/proc/locations",
+                        "n4s_sp")
+n4s_scd <- n4s_sp
+
+### Travel time to nearest city of 50,000 people, median minutes for 5000m radius
+# from https://map.ox.ac.uk/research-project/accessibility_to_cities/
+# Weiss 2018 https://www.nature.com/articles/nature25181
+dat <- raster::raster("C:/n4s_local/sango/secondary_data/global/2015_accessibility_to_cities_v1.0/2015_accessibility_to_cities_v1.0.tif")
+fn <- function(x,...) median(x[x>=0],na.rm = T) # median, and deal with NAs below zero
+ras_ext(n4s_scd,dat,5000,"ma_trtm",fn)
+hist(n4s_scd$ma_trtm) # check
+summary(n4s_scd$ma_trtm)
+
+### Population density 2015, median people per km2 for 5000m radius
+# 2.5 arc second from CIESIN https://sedac.ciesin.columbia.edu/data/set/gpw-v4-population-density-rev11
+dat <- raster::raster("C:/n4s_local/sango/secondary_data/global/gpw_v4_population_density_rev11_2015_30_sec/gpw_v4_population_density_rev11_2015_30_sec.tif")
+fn <- function(x,...) median(x,na.rm = T) # median
+ras_ext(n4s_scd,dat,5000,"dg_pop_d",fn)
+hist(n4s_scd$dg_pop_d) # check
+summary(n4s_scd$dg_pop_d)
+
+### GDP (total and per capita) in local admin area growth 1990 to 2015, mean % increase in 5000m radius
+# https://datadryad.org/stash/dataset/doi:10.5061/dryad.dk1j0
+require(ncdf4)
+
+## per capita
+dat <- raster::brick("C:/n4s_local/sango/secondary_data/global/gdp_dryad/GDP_per_capita_PPP_1990_2015_v2.nc",
+                     varname= "GDP_per_capita_PPP")
+fn <- function(x,...) mean(x,na.rm=T) # mean
+
+# 2015
+ras_ext(n4s_scd,dat$X2015,5000,"ma_gdp_pc15",fn)
+
+```
+
+
+```{r final stuff, message = FALSE, warning = FALSE, include = FALSE, echo = FALSE}
+
+# get vars we are using
+tmp <- n4s_scd@data %>%
+  dplyr::select(cn, pjnm, stt_pjd, sett_nm,ma_trtm,dg_pop_d,ma_gdp_pc15)
+#names(tmp)[names(tmp)=="stt_pjd"] <- "sett_pjid"
+
+
+# write as csv
+write.csv(tmp, "../data/proc/sett_att_data/sett_att_all.csv")
+
+# write as shp
+#rgdal::writeOGR(n4s_scd,"../data/proc","n4s_scd", driver="ESRI Shapefile", overwrite_layer = TRUE)
+
+```
